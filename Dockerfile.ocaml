@@ -1,0 +1,36 @@
+FROM docker/sandbox-templates:claude-code
+
+USER root
+
+# ── System deps ──────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc g++ gdb valgrind cmake make \
+    pkg-config libssl-dev libffi-dev zlib1g-dev \
+    libgmp-dev libpcre3-dev \
+    m4 bubblewrap unzip \
+    curl wget htop tree strace \
+    opam \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Initialize opam + install OCaml as agent user ───────
+USER agent
+
+RUN opam init --bare --disable-sandboxing -y && \
+    opam switch create 5.2.0 ocaml-base-compiler.5.2.0 && \
+    eval $(opam env) && \
+    opam install -y \
+        dune ocamlfind merlin ocaml-lsp-server \
+        odoc ocp-indent ocamlformat \
+        utop \
+        alcotest qcheck ppx_expect ppx_inline_test \
+        core core_unix core_kernel \
+        ppx_jane \
+        async async_unix \
+        yojson cmdliner fmt logs \
+        lwt lwt_ppx cohttp-lwt-unix \
+        re pcre \
+        menhir sedlex
+
+# ── Shell setup so opam env is always loaded ─────────────
+RUN echo 'eval $(opam env)' >> /home/agent/.bashrc && \
+    echo 'eval $(opam env)' >> /home/agent/.profile

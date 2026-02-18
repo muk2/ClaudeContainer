@@ -1,0 +1,47 @@
+FROM docker/sandbox-templates:claude-code
+
+USER root
+
+# ── System deps ──────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc g++ gdb valgrind cmake make \
+    pkg-config libssl-dev libffi-dev zlib1g-dev \
+    libpq-dev postgresql-client \
+    lldb strace ltrace binutils elfutils \
+    mold \
+    curl wget unzip htop tree \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Rust (install directly as agent to avoid 3GB copy) ──
+USER agent
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+    . "$HOME/.cargo/env" && \
+    rustup component add rust-analyzer clippy rustfmt rust-src
+
+# ── Cargo tools (batch to reduce layers) ────────────────
+RUN . "$HOME/.cargo/env" && \
+    cargo install \
+        cargo-watch cargo-expand \
+        cargo-audit cargo-outdated \
+        cargo-deny cargo-edit cargo-bloat \
+        cargo-criterion cargo-asm \
+        tokio-console \
+    2>&1 || true
+
+# These are flaky — install separately
+RUN . "$HOME/.cargo/env" && cargo install cargo-nextest || true
+RUN . "$HOME/.cargo/env" && cargo install cargo-flamegraph || true
+
+ENV PATH="/home/agent/.cargo/bin:${PATH}"
+
+# ── Mold is already installed above via apt ──────────────
+# Configure as default linker for faster linking:
+RUN mkdir -p /home/agent/.cargo && \
+    echo '[target.aarch64-unknown-linux-gnu]' >> /home/agent/.cargo/config.toml && \
+    echo 'linker = "clang"' >> /home/agent/.cargo/config.toml && \
+    echo 'rustflags = ["-C", "link-arg=-fuse-ld=mold"]' >> /home/agent/.cargo/config.toml && \
+    echo '' >> /home/agent/.cargo/config.toml && \
+    echo '[target.x86_64-unknown-linux-gnu]' >> /home/agent/.cargo/config.toml && \
+    echo 'linker = "clang"' >> /home/agent/.cargo/config.toml && \
+    echo 'rustflags = ["-C", "link-arg=-fuse-ld=mold"]' >> /home/agent/.cargo/config.toml

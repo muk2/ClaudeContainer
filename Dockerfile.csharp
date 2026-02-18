@@ -1,0 +1,56 @@
+FROM docker/sandbox-templates:claude-code
+
+USER root
+
+# ── System deps ──────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc g++ gdb cmake make \
+    pkg-config libssl-dev libffi-dev zlib1g-dev \
+    libicu-dev libkrb5-dev \
+    curl wget unzip htop tree strace \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── .NET SDK 9 (latest) + 8 LTS ─────────────────────────
+RUN curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin \
+        --channel 9.0 --install-dir /usr/share/dotnet && \
+    curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin \
+        --channel 8.0 --install-dir /usr/share/dotnet && \
+    ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet
+ENV DOTNET_ROOT="/usr/share/dotnet"
+ENV PATH="${DOTNET_ROOT}:${DOTNET_ROOT}/tools:${PATH}"
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+ENV DOTNET_NOLOGO=1
+
+# ── Global .NET tools ───────────────────────────────────
+RUN dotnet tool install -g dotnet-format && \
+    dotnet tool install -g dotnet-outdated-tool && \
+    dotnet tool install -g dotnet-ef && \
+    dotnet tool install -g dotnet-trace && \
+    dotnet tool install -g dotnet-dump && \
+    dotnet tool install -g dotnet-counters && \
+    dotnet tool install -g dotnet-coverage && \
+    dotnet tool install -g csharpier
+ENV PATH="/root/.dotnet/tools:${PATH}"
+
+# Copy tools to agent user
+RUN cp -r /root/.dotnet /home/agent/.dotnet && \
+    chown -R agent:agent /home/agent/.dotnet
+ENV PATH="/home/agent/.dotnet/tools:${PATH}"
+
+# ── Warm up NuGet cache with common packages ─────────────
+RUN mkdir -p /tmp/warmup && cd /tmp/warmup && \
+    dotnet new console -n warmup && cd warmup && \
+    dotnet add package Newtonsoft.Json && \
+    dotnet add package xunit && \
+    dotnet add package BenchmarkDotNet && \
+    dotnet add package FluentAssertions && \
+    dotnet add package Moq && \
+    dotnet add package Dapper && \
+    dotnet add package Npgsql && \
+    dotnet add package Serilog && \
+    dotnet restore && \
+    cd / && rm -rf /tmp/warmup
+
+USER agent
+
+RUN echo 'export PATH="$HOME/.dotnet/tools:$PATH"' >> /home/agent/.bashrc

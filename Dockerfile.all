@@ -1,0 +1,171 @@
+FROM docker/sandbox-templates:claude-code
+
+# ═════════════════════════════════════════════════════════
+#  THE ULTIMATE SANDBOX — Every toolchain, one image
+#  Estimated size: ~8-10GB (down from ~12-15GB)
+#  Build time: ~15-25 min (one-time cost)
+# ═════════════════════════════════════════════════════════
+
+USER root
+
+# ── System deps (shared across all toolchains) ──────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc g++ gcc-13 g++-13 \
+    clang clang-format clang-tidy clang-tools \
+    lld lldb libc++-dev libc++abi-dev \
+    gdb gdbserver valgrind cmake make ninja-build \
+    pkg-config autoconf automake libtool \
+    nasm yasm mold \
+    strace ltrace binutils elfutils \
+    libssl-dev libffi-dev zlib1g-dev \
+    libgmp-dev libpcre3-dev \
+    libpq-dev postgresql-client \
+    libboost-dev libfmt-dev nlohmann-json3-dev \
+    libsqlite3-dev libreadline-dev libncurses5-dev \
+    libicu-dev libkrb5-dev \
+    python3-dev \
+    m4 bubblewrap opam \
+    cppcheck doxygen graphviz \
+    curl wget unzip zip tar htop tree xxd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set gcc-13 as default
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 \
+    --slave /usr/bin/g++ g++ /usr/bin/g++-13
+
+# ── uv (fast Python package manager) ────────────────────
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    cp /root/.local/bin/uv /usr/local/bin/uv && \
+    cp /root/.local/bin/uvx /usr/local/bin/uvx
+
+# ── Python ───────────────────────────────────────────────
+RUN uv pip install --system --break-system-packages \
+    pytest pytest-asyncio pytest-cov hypothesis \
+    black ruff mypy pyright isort \
+    ipython ipdb py-spy memray \
+    setuptools wheel build poetry hatch \
+    numpy pandas polars httpx pydantic \
+    fastapi uvicorn sqlalchemy asyncpg \
+    rich typer conan
+
+# ── Rust (install as agent to avoid 3GB copy) ───────────
+# We install as root first for cargo tools, then move efficiently
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+    /root/.cargo/bin/rustup component add \
+        rust-analyzer clippy rustfmt rust-src && \
+    /root/.cargo/bin/cargo install \
+        cargo-watch cargo-expand \
+        cargo-audit cargo-outdated \
+        cargo-edit cargo-bloat
+
+RUN /root/.cargo/bin/cargo install cargo-nextest || true
+RUN /root/.cargo/bin/cargo install cargo-flamegraph || true
+
+# Move rust to agent (mv instead of cp to save disk during build)
+RUN mv /root/.cargo /home/agent/.cargo && \
+    mv /root/.rustup /home/agent/.rustup && \
+    chown -R agent:agent /home/agent/.cargo /home/agent/.rustup
+ENV PATH="/home/agent/.cargo/bin:${PATH}"
+
+# ── Go ───────────────────────────────────────────────────
+ARG GO_VERSION=1.24.4
+RUN ARCH="$(dpkg --print-architecture)" && \
+    case "$ARCH" in amd64) GOARCH=amd64 ;; arm64) GOARCH=arm64 ;; esac && \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz" \
+    | tar -C /usr/local -xzf -
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+RUN GOPATH=/root/go go install golang.org/x/tools/gopls@latest && \
+    GOPATH=/root/go go install github.com/go-delve/delve/cmd/dlv@latest && \
+    GOPATH=/root/go go install honnef.co/go/tools/cmd/staticcheck@latest && \
+    GOPATH=/root/go go install golang.org/x/tools/cmd/goimports@latest && \
+    GOPATH=/root/go go install golang.org/x/vuln/cmd/govulncheck@latest && \
+    GOPATH=/root/go go install github.com/google/pprof@latest \
+    || true
+
+RUN GOPATH=/root/go go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest || true
+
+RUN mkdir -p /home/agent/go/bin && \
+    mv /root/go/bin/* /home/agent/go/bin/ 2>/dev/null || true && \
+    chown -R agent:agent /home/agent/go
+ENV GOPATH="/home/agent/go"
+ENV PATH="${GOPATH}/bin:${PATH}"
+
+# ── Zig ──────────────────────────────────────────────────
+ARG ZIG_VERSION=0.13.0
+RUN ARCH="$(dpkg --print-architecture)" && \
+    case "$ARCH" in amd64) ZIGARCH=x86_64 ;; arm64) ZIGARCH=aarch64 ;; esac && \
+    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIGARCH}-${ZIG_VERSION}.tar.xz" \
+    | tar -xJ -C /usr/local && \
+    ln -s /usr/local/zig-linux-${ZIGARCH}-${ZIG_VERSION}/zig /usr/local/bin/zig
+
+# ── .NET SDK 9 + 8 ──────────────────────────────────────
+RUN curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin \
+        --channel 9.0 --install-dir /usr/share/dotnet && \
+    curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin \
+        --channel 8.0 --install-dir /usr/share/dotnet && \
+    ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet
+ENV DOTNET_ROOT="/usr/share/dotnet"
+ENV PATH="${DOTNET_ROOT}:${DOTNET_ROOT}/tools:${PATH}"
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+ENV DOTNET_NOLOGO=1
+
+RUN dotnet tool install -g dotnet-ef && \
+    dotnet tool install -g dotnet-trace && \
+    dotnet tool install -g dotnet-dump && \
+    dotnet tool install -g csharpier
+
+RUN cp -r /root/.dotnet /home/agent/.dotnet 2>/dev/null || true && \
+    chown -R agent:agent /home/agent/.dotnet 2>/dev/null || true
+ENV PATH="/home/agent/.dotnet/tools:${PATH}"
+
+# ── Lean 4 (install to shared location, fix permissions) ─
+ENV ELAN_HOME="/usr/local/elan"
+RUN curl https://elan.lean-lang.org/elan-init.sh -sSf \
+    | ELAN_HOME="$ELAN_HOME" sh -s -- -y --no-modify-path --default-toolchain leanprover/lean4:stable && \
+    chmod -R a+rwx "$ELAN_HOME"
+ENV PATH="${ELAN_HOME}/bin:${PATH}"
+
+# ── Node.js / TypeScript (global) ───────────────────────
+RUN npm install -g typescript tsx ts-node
+
+# ── vcpkg (C/C++ package manager) ───────────────────────
+RUN git clone --depth 1 https://github.com/microsoft/vcpkg.git /opt/vcpkg && \
+    /opt/vcpkg/bootstrap-vcpkg.sh && \
+    ln -s /opt/vcpkg/vcpkg /usr/local/bin/vcpkg
+ENV VCPKG_ROOT="/opt/vcpkg"
+
+# ── Switch to agent user ────────────────────────────────
+USER agent
+
+# ── Lean workaround: agent-local elan if system one fails
+RUN mkdir -p /home/agent/.elan && \
+    ln -sf /usr/local/elan/toolchains /home/agent/.elan/toolchains 2>/dev/null || true && \
+    ln -sf /usr/local/elan/bin /home/agent/.elan/bin 2>/dev/null || true
+
+# ── OCaml (must init as agent) ───────────────────────────
+RUN opam init --bare --disable-sandboxing -y && \
+    opam switch create 5.2.0 ocaml-base-compiler.5.2.0 && \
+    eval $(opam env) && \
+    opam install -y \
+        dune ocamlfind merlin ocaml-lsp-server \
+        odoc ocamlformat utop \
+        alcotest qcheck ppx_expect ppx_inline_test \
+        core core_unix ppx_jane \
+        async yojson cmdliner fmt lwt
+
+# ── Shell config ─────────────────────────────────────────
+RUN cat >> /home/agent/.bashrc << 'EOF'
+# Rust
+export PATH="$HOME/.cargo/bin:$PATH"
+# Go
+export GOPATH="$HOME/go"
+export PATH="$GOPATH/bin:/usr/local/go/bin:$PATH"
+# .NET
+export PATH="$HOME/.dotnet/tools:$PATH"
+# Lean
+export ELAN_HOME="/usr/local/elan"
+export PATH="$ELAN_HOME/bin:$PATH"
+# OCaml (auto-activate opam switch)
+eval $(opam env 2>/dev/null) || true
+EOF

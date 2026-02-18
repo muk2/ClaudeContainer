@@ -1,0 +1,52 @@
+FROM docker/sandbox-templates:claude-code
+
+USER root
+
+# ── System deps ──────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc g++ gdb valgrind cmake make \
+    pkg-config libssl-dev libffi-dev zlib1g-dev \
+    libbz2-dev libreadline-dev libsqlite3-dev \
+    libncurses5-dev libgdbm-dev liblzma-dev \
+    libpq-dev postgresql-client \
+    python3-dev \
+    curl wget unzip htop tree strace \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── uv (fast Python package manager, replaces pip) ──────
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    cp /root/.local/bin/uv /usr/local/bin/uv && \
+    cp /root/.local/bin/uvx /usr/local/bin/uvx
+
+# ── Python dev tools via uv (10-50x faster than pip) ────
+RUN uv tool install ruff && \
+    uv tool install black && \
+    uv tool install mypy && \
+    uv tool install pyright && \
+    uv tool install isort && \
+    uv tool install ipython && \
+    uv tool install poetry && \
+    uv tool install hatch
+
+# ── Core libraries (installed globally via uv pip) ──────
+RUN uv pip install --system --break-system-packages \
+    pytest pytest-asyncio pytest-cov pytest-benchmark hypothesis \
+    ipdb pdbpp py-spy memray \
+    types-requests types-redis \
+    setuptools wheel build twine \
+    numpy pandas polars \
+    httpx requests aiohttp \
+    pydantic fastapi uvicorn \
+    sqlalchemy alembic asyncpg psycopg2-binary \
+    rich typer click \
+    anyio trio
+
+# scalene needs python3-dev and can be flaky on aarch64
+RUN uv pip install --system --break-system-packages scalene || true
+
+# ── Copy uv tools to agent user ─────────────────────────
+RUN cp -r /root/.local/share/uv /home/agent/.local/share/uv 2>/dev/null || true && \
+    cp -r /root/.local/bin/* /usr/local/bin/ 2>/dev/null || true && \
+    chown -R agent:agent /home/agent/.local 2>/dev/null || true
+
+USER agent
