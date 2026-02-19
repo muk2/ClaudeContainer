@@ -183,351 +183,332 @@ On the **first run only**, Claude Code prompts you to log in via browser. After 
 
 ---
 
-## Windows Setup (Docker Desktop + WSL2)
+# Windows Setup: Podman + PowerShell
 
-### Step 1: Install WSL2
+Complete guide for running Claude Code dev containers on Windows using Podman. No Docker Desktop license needed — Podman is free and open source.
 
-PowerShell as Administrator:
+---
+
+## Step 1: Install Podman
+
+### Option A: Podman Desktop (GUI + CLI)
+
+Download from [podman-desktop.io](https://podman-desktop.io). Run the installer. It handles WSL2 setup for you.
+
+### Option B: CLI Only (winget)
+
+Open PowerShell as **Administrator**:
 
 ```powershell
+# Install WSL2 if not already installed
 wsl --install
+
+# Restart your computer, then:
+
+# Install Podman
+winget install RedHat.Podman
 ```
 
-Restart when prompted.
+Close and reopen PowerShell after install.
 
-### Step 2: Install Docker Desktop
+### Optional: Install Windows Terminal
 
-Download from [docker.com](https://docker.com). Configure:
-
-- Settings → General → Enable **"Use WSL 2 based engine"**
-- Settings → Resources → WSL Integration → Enable for Ubuntu
-- Settings → Resources → Disk image size → **128GB or higher**
-
-### Step 3: Set Up in WSL2
-
-Open **Ubuntu** from Start menu:
-
-```bash
-git clone https://github.com/YOUR_USERNAME/claude-containers.git ~/.claude/sandboxes
-docker volume create claude-config
-docker volume create build-cache
+```powershell
+winget install Microsoft.WindowsTerminal
 ```
 
-### Step 4: Add Aliases to `~/.bashrc`
+---
 
-Copy the same alias block from the Mac section into `~/.bashrc`, then:
+## Step 2: Initialize the Podman Machine
 
-```bash
-source ~/.bashrc
+Podman on Windows runs containers inside a lightweight Linux VM. Initialize it once:
+
+```powershell
+# Create the machine (uses WSL2 by default)
+podman machine init
+
+# Give it more resources (adjust to your hardware)
+podman machine set --cpus 4 --memory 8192 --disk-size 100
+
+# Start it
+podman machine start
 ```
 
-### Step 5: Build and Run
+Verify:
 
-```bash
+```powershell
+podman version
+podman run quay.io/podman/hello
+```
+
+If the hello container prints a message, you're good.
+
+---
+
+## Step 3: Make Podman Work Like Docker
+
+Podman commands are nearly identical to Docker. Set up an alias so all scripts work:
+
+```powershell
+# Add to your PowerShell profile
+notepad $PROFILE
+
+# Paste this line:
+Set-Alias -Name docker -Value podman
+
+# Save and close, then reload:
+. $PROFILE
+```
+
+Now `docker build`, `docker run`, etc. all route through Podman.
+
+---
+
+## Step 4: Get the Dockerfiles
+
+```powershell
+# Clone the repo
+git clone https://github.com/YOUR_USERNAME/claude-containers.git $HOME\.claude\sandboxes
+
+# Or create manually
+mkdir -p $HOME\.claude\sandboxes
+# Copy all Dockerfile.* files there
+```
+
+---
+
+## Step 5: Create Persistent Volumes
+
+```powershell
+podman volume create claude-config
+podman volume create build-cache
+```
+
+---
+
+## Step 6: Add PowerShell Functions
+
+Open your PowerShell profile:
+
+```powershell
+notepad $PROFILE
+```
+
+Paste this entire block:
+
+```powershell
+# ── Claude Containers (Podman) ───────────────────────────
+
+# Build a language image (run once per language)
+function sb-lang {
+    param([string]$Lang)
+    podman build -t "claude-${Lang}:latest" `
+        -f "$HOME\.claude\sandboxes\Dockerfile.$Lang" `
+        "$HOME\.claude\sandboxes\"
+}
+
+# Run Claude in a project
+function sb {
+    param(
+        [string]$Lang = "rust",
+        [string]$Path = "."
+    )
+    $Project = (Resolve-Path $Path).Path
+    $Name = "claude-$(Split-Path $Project -Leaf)"
+
+    podman run -it --rm `
+        --name $Name `
+        -v "${Project}:/workspace" `
+        -v "claude-config:/home/agent/.claude" `
+        -v "build-cache:/home/agent/.cache" `
+        -w /workspace `
+        "claude-${Lang}:latest" `
+        claude --dangerously-skip-permissions
+}
+
+# Shell into running container
+function sb-shell {
+    param([string]$Path = ".")
+    $Project = (Resolve-Path $Path).Path
+    $Name = "claude-$(Split-Path $Project -Leaf)"
+    podman exec -it $Name bash
+}
+
+# Stop a container
+function sb-down {
+    param([string]$Path = ".")
+    $Project = (Resolve-Path $Path).Path
+    $Name = "claude-$(Split-Path $Project -Leaf)"
+    podman stop $Name 2>$null
+}
+
+# List running Claude containers
+function sb-ls {
+    podman ps --filter "name=claude-" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+}
+
+# Clean up disk space
+function sb-prune {
+    podman system prune -f
+}
+
+# Start/stop Podman machine
+function sb-start { podman machine start }
+function sb-stop { podman machine stop }
+```
+
+Save, close, reload:
+
+```powershell
+. $PROFILE
+```
+
+---
+
+## Step 7: Build and Run
+
+```powershell
+# Build an image (one-time per language)
 sb-lang rust
-sb rust ~/projects/my-app
-```
+sb-lang python
+sb-lang js
 
-### Alternative: No Containers
-
-Claude Code runs natively on Windows:
-
-1. Install [Git for Windows](https://git-scm.com/download/win)
-2. Download Claude Code from [anthropic.com](https://anthropic.com)
-3. Open Git Bash → `claude`
-
----
-
-## Commands
-
-### `sb-lang <language>` — Build an Image
-
-**When:** Once per language, or after editing a Dockerfile.
-
-```bash
-sb-lang js            # JavaScript / TypeScript (Node, Bun, pnpm)
-sb-lang rust          # Rust
-sb-lang python        # Python
-sb-lang go            # Go
-sb-lang ocaml         # OCaml
-sb-lang lean          # Lean 4
-sb-lang csharp        # C# / .NET
-sb-lang cpp           # C++
-sb-lang c             # C
-sb-lang zig           # Zig
-sb-lang all           # mega image with every language
-```
-
-### `sb <language> [path]` — Run Claude
-
-**When:** Every time you want to start working on a project.
-
-The path is optional. If omitted, it uses your current directory.
-
-```bash
-# These are all equivalent:
-cd ~/projects/my-app
-sb rust                           # uses current directory
-sb rust .                         # explicit current directory
-sb rust ~/projects/my-app         # explicit full path
-
-# Different languages:
-sb js                             # JS/TS toolchain, current dir
-sb python                         # Python toolchain, current dir
-sb go ~/projects/api              # Go toolchain, specific path
-sb all .                          # all languages, current dir
-```
-
-When you exit Claude (Ctrl+C, `/exit`, or type `exit`), the container is **automatically destroyed**. You do not need to clean anything up. Your project files on disk are untouched.
-
-### `sb-shell [path]` — Side Terminal
-
-**When:** You want your own terminal inside the same container while Claude is running. Open this in a new tab or tmux pane.
-
-```bash
-sb-shell                          # current directory's container
-sb-shell ~/projects/my-app        # specific project's container
-```
-
-You and Claude share the same filesystem. You can run tests, inspect files, debug — while Claude works.
-
-### `sb-ls` — List Running Containers
-
-**When:** You want to see what's running.
-
-```bash
-sb-ls
-```
-
-### `sb-down [path]` — Stop a Container
-
-**When:** You want to stop a container without being inside it (e.g., you closed the terminal by accident).
-
-```bash
-sb-down                           # stop current dir's container
-sb-down ~/projects/my-app         # stop specific container
-```
-
-Normally you don't need this — exiting Claude already destroys the container.
-
-### `sb-prune` — Free Disk Space
-
-**When:** Docker is using too much disk.
-
-```bash
-sb-prune                          # removes stopped containers and dangling images
-```
-
-For a deeper clean:
-
-```bash
-docker system prune -a --volumes -f   # removes EVERYTHING unused (images, volumes, cache)
-```
-
----
-
-## Workflow
-
-### Working on a Project
-
-```bash
-sb-lang rust                      # one-time: build image
-cd ~/projects/my-app
-sb rust                           # Claude launches with full toolchain
-# ... work with Claude ...
-# Ctrl+C or /exit when done
-# Container auto-removes. Files on disk are saved.
-```
-
-### Side-by-Side with Tmux
-
-```bash
-tmux
-
-# Left pane: Claude
+# Start Claude in a project
+cd C:\Users\YourName\projects\my-app
 sb rust
 
-# Ctrl+b, % (split right)
+# Or with explicit path
+sb rust C:\Users\YourName\projects\my-app
 
-# Right pane: You
-sb-shell
+# Or current directory (default)
+sb rust
 ```
 
-### Multiple Projects
+First run will prompt browser login. After that, the `claude-config` volume saves your auth.
 
-```bash
-# Terminal 1
-cd ~/projects/app-a && sb rust
+---
 
-# Terminal 2
-cd ~/projects/ml-thing && sb python
+## Commands Reference
 
-# Both run simultaneously. Only the one actively compiling uses CPU.
+```powershell
+# Build
+sb-lang rust              # Build Rust image
+sb-lang python            # Build Python image
+sb-lang js                # Build JS/TS image
+sb-lang all               # Build mega image
+
+# Run
+sb rust                   # Current dir, Rust toolchain
+sb python .               # Current dir, Python
+sb go C:\path\to\project  # Specific path, Go
+
+# Side terminal (new PowerShell window while Claude runs)
+sb-shell                  # Current dir
+sb-shell C:\path          # Specific project
+
+# Management
+sb-ls                     # List running containers
+sb-down                   # Stop current dir's container
+sb-prune                  # Clean up disk
+
+# Podman machine
+sb-start                  # Start the Linux VM
+sb-stop                   # Stop it (saves battery)
+```
+
+---
+
+## Daily Workflow
+
+```powershell
+# Morning: start Podman machine
+sb-start
+
+# Work on a project
+cd C:\Users\YourName\projects\my-app
+sb rust
+# Claude launches. Work with it. Ctrl+C when done.
+
+# Side terminal (open new PowerShell tab)
+sb-shell
+
+# Switch projects
+cd C:\Users\YourName\projects\ml-thing
+sb python
+
+# End of day: stop machine (optional, saves resources)
+sb-stop
 ```
 
 ---
 
 ## Practicing a Language
 
-### Lean
-
-```bash
-sb-lang lean                      # one-time
-mkdir -p ~/practice/lean
-cd ~/practice/lean
+```powershell
+sb-lang lean
+mkdir $HOME\practice\lean
+cd $HOME\practice\lean
 sb lean
-```
+# Ask Claude to teach you theorem proving
 
-> Create a Lean 4 project that teaches me theorem proving. Start with
-> simple propositions and build up to induction proofs.
-
-### OCaml
-
-```bash
-sb-lang ocaml                     # one-time
-mkdir -p ~/practice/ocaml
-cd ~/practice/ocaml
+sb-lang ocaml
+mkdir $HOME\practice\ocaml
+cd $HOME\practice\ocaml
 sb ocaml
-```
+# Ask Claude for Jane Street interview prep
 
-> Create exercises covering pattern matching, algebraic data types,
-> modules, and functors using Jane Street's Core library.
-
-### Rust
-
-```bash
-sb-lang rust                      # one-time
-mkdir -p ~/practice/rust
-cd ~/practice/rust
+sb-lang rust
+mkdir $HOME\practice\rust
+cd $HOME\practice\rust
 sb rust
-```
-
-> Build exercises that teach ownership, borrowing, and lifetimes.
-> Each exercise should have a failing test I need to make pass.
-
-### JavaScript / TypeScript
-
-```bash
-sb-lang js                        # one-time
-mkdir -p ~/practice/fullstack
-cd ~/practice/fullstack
-sb js
-```
-
-> Build a Next.js app with Prisma and a REST API. Use TypeScript,
-> Vitest for testing, and Biome for linting. Set up the full stack.
-
-Claude has `node`, `bun`, `npm`, `pnpm`, `typescript`, `next`, `prisma`, `vitest`, and framework CLIs ready.
-
-### Practice with Tmux
-
-```bash
-tmux
-sb rust                           # left pane: Claude (teacher)
-# Ctrl+b, %
-sb-shell                          # right pane: you (student)
-
-# Claude creates exercises on the left.
-# You solve them on the right.
-# Ask Claude for hints when stuck.
+# Ask Claude to build ownership/lifetime exercises
 ```
 
 ---
 
-## Adding to a Repo
+## Podman Machine Management
 
-Let contributors spin up a Claude-ready environment for your project. Add `.devcontainer/` to your repo:
+The Podman machine is a lightweight Linux VM that runs your containers. It needs to be running before you use any `sb` command.
 
+```powershell
+# Check machine status
+podman machine ls
+
+# Start (do this after reboot or after sb-stop)
+podman machine start
+
+# Stop (frees RAM/CPU, run when done for the day)
+podman machine stop
+
+# Resize (if you need more resources)
+podman machine stop
+podman machine set --cpus 6 --memory 16384 --disk-size 150
+podman machine start
+
+# Nuclear reset (if something breaks)
+podman machine rm
+podman machine init
+podman machine set --cpus 4 --memory 8192 --disk-size 100
+podman machine start
 ```
-my-project/
-├── .devcontainer/
-│   ├── devcontainer.json
-│   └── Dockerfile
-├── src/
-└── README.md
-```
-
-**`.devcontainer/devcontainer.json`:**
-
-```json
-{
-    "name": "Claude Dev",
-    "build": { "dockerfile": "Dockerfile" },
-    "features": {
-        "ghcr.io/anthropics/devcontainer-features/claude-code:latest": {}
-    },
-    "mounts": [
-        "source=claude-config,target=/home/vscode/.claude,type=volume",
-        "source=build-cache,target=/home/vscode/.cache,type=volume"
-    ]
-}
-```
-
-**`.devcontainer/Dockerfile`:** Copy your language Dockerfile but change the base:
-
-```dockerfile
-FROM ubuntu:24.04    # instead of docker/sandbox-templates:claude-code
-```
-
-**Contributors run:**
-
-```bash
-npm install -g @devcontainers/cli
-devcontainer up --workspace-folder .
-devcontainer exec --workspace-folder . bash
-claude --dangerously-skip-permissions
-```
-
-Or in VS Code: `Cmd+Shift+P` → "Reopen in Container"
-
----
-
-## How It Works
-
-```
-┌──────────────────────────────────────┐
-│           Your Machine               │
-│  ~/projects/my-app ──────────────┐   │
-│                                  │   │
-│  OrbStack / Colima (Mac) or      │   │
-│  Docker Desktop (Windows)        │   │
-└──────────────────────────────────│───┘
-                                   │ mounted at /workspace
-┌──────────────────────────────────▼───┐
-│         Docker Container             │
-│  ┌────────────────────────────────┐  │
-│  │ Language Toolchain             │  │
-│  │ (Rust/Python/Go/OCaml/etc.)   │  │
-│  └────────────────────────────────┘  │
-│  ┌────────────────────────────────┐  │
-│  │ Claude Code                    │  │
-│  │ --dangerously-skip-permissions │  │
-│  └────────────────────────────────┘  │
-│  ┌────────────────────────────────┐  │
-│  │ Persistent Volumes             │  │
-│  │ claude-config → login/settings │  │
-│  │ build-cache → cargo/pip/go     │  │
-│  └────────────────────────────────┘  │
-└──────────────────────────────────────┘
-```
-
-- **Your files** stay on your machine, mounted into the container.
-- **Claude** runs inside with full permissions — only inside the container.
-- **Volumes** persist login and caches across sessions.
-- **On exit**, the container is destroyed. Your files remain. Next `sb` is instant.
 
 ---
 
 ## Disk Management
 
-```bash
-docker system df                                # what's using space
-docker images | grep claude                     # image sizes
-docker rmi claude-cpp:latest                    # remove one image
-docker system prune -a --volumes -f             # nuclear: remove everything unused
-```
+```powershell
+# See what's using space
+podman system df
 
-Only build images for languages you actively use.
+# See image sizes
+podman images
+
+# Remove an image
+podman rmi claude-cpp:latest
+
+# Remove everything unused
+podman system prune -a --volumes -f
+```
 
 ---
 
@@ -535,22 +516,30 @@ Only build images for languages you actively use.
 
 | Problem | Fix |
 |---------|-----|
-| "Cannot connect to Docker daemon" | Start your runtime: `open -a OrbStack` or `colima start` |
-| "no space left on device" | `docker system prune -a --volumes -f` |
-| "permission denied" on /workspace | `chmod -R a+rw ~/projects/my-app` |
-| Login not working | `docker volume rm claude-config && docker volume create claude-config` |
-| Tools missing (cargo, python) | Rebuild image: `sb-lang rust` |
-| "name already in use" | Container still running: `sb-down` then retry |
-| Container exits immediately | Restart your runtime: quit and reopen OrbStack, or `colima stop && colima start` |
-| Wrong runtime active | `docker context ls` to check, `docker context use <name>` to switch |
-| Colima slow file I/O | Restart with `--mount-type virtiofs` and `--vm-type vz` |
+| "Cannot connect to Podman" | Start the machine: `podman machine start` |
+| "no space left on device" | `podman system prune -a --volumes -f` |
+| Machine won't start | `podman machine rm` then re-init |
+| Slow file I/O | Normal with WSL2 mounts. Keep projects in WSL filesystem for speed |
+| "permission denied" on volume | Try: `podman machine set --rootful` then restart |
+| Login prompt every time | Check volume: `podman volume inspect claude-config` |
+| Podman command not found | Close and reopen PowerShell, or check PATH |
+| Need Docker compatibility | Add `Set-Alias -Name docker -Value podman` to `$PROFILE` |
+
+---
+
+## Why Podman Over Docker Desktop?
+
+- **Free** — No license fees, even for commercial use at companies with 250+ employees
+- **Rootless** — Containers run as your user, not as root. Better security by default
+- **Docker-compatible** — Same commands, same Dockerfiles, same images
+- **No daemon** — Podman doesn't run a background service eating resources
+- **Open source** — Apache 2.0 license
 
 ---
 
 ## Architecture
 
-All images auto-detect Apple Silicon (`arm64`) and Intel (`amd64`). No configuration needed.
+All Dockerfiles work with Podman unchanged. Podman reads Dockerfiles natively (it calls them Containerfiles, but accepts both). Architecture auto-detection works the same:
 
-## License
-
-Dockerfiles are MIT. Claude Code is subject to [Anthropic's Terms of Service](https://www.anthropic.com/terms).
+- **Intel/AMD** → `x86_64` / `amd64`
+- **ARM (Surface Pro X, Snapdragon)** → `aarch64` / `arm64`g
