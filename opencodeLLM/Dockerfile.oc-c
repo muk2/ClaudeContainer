@@ -1,0 +1,99 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── System ───────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc g++ make cmake \
+    pkg-config libssl-dev libffi-dev zlib1g-dev \
+    git git-lfs ssh-client \
+    curl wget unzip zip tar \
+    htop tree jq ripgrep fd-find strace \
+    ca-certificates gnupg lsb-release \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Node 22 (OpenCode dep) ──────────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── GitHub CLI ───────────────────────────────────────────
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+    apt-get update && apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── Gitea tea CLI ────────────────────────────────────────
+RUN ARCH="$(dpkg --print-architecture)" && \
+    curl -fsSL "https://dl.gitea.com/tea/0.9.2/tea-0.9.2-linux-${ARCH}" \
+    -o /usr/local/bin/tea && chmod +x /usr/local/bin/tea || true
+
+# ── OpenCode ─────────────────────────────────────────────
+RUN curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh && \
+    bash /tmp/install-opencode.sh && \
+    rm /tmp/install-opencode.sh && \
+    cp /root/.opencode/bin/opencode /usr/local/bin/opencode && \
+    opencode --version
+
+# ── C toolchain ──────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc-13 \
+    clang clang-format clang-tidy clang-tools \
+    lld lldb \
+    gdb gdbserver valgrind \
+    ninja-build \
+    autoconf automake libtool \
+    nasm yasm \
+    libcurl4-openssl-dev libxml2-dev \
+    libsqlite3-dev libpq-dev \
+    libevent-dev libev-dev libuv1-dev \
+    libpcre3-dev libjansson-dev \
+    libcmocka-dev \
+    cppcheck \
+    doxygen graphviz \
+    binutils elfutils ltrace xxd \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130
+
+RUN useradd -m -s /bin/bash agent
+
+# ── OpenCode config ──────────────────────────────────────
+RUN mkdir -p /home/agent/.config/opencode && \
+    cat > /home/agent/.config/opencode/opencode.json << 'OCEOF'
+{
+    "$schema": "https://opencode.ai/config.json",
+    "provider": {
+        "ollama": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Ollama (host GPU)",
+            "options": { "baseURL": "http://host.docker.internal:11434/v1" },
+            "models": {
+                "qwen3-coder:30b-32k": { "name": "Qwen3 Coder 30B", "tools": true },
+                "qwen3:14b-16k":       { "name": "Qwen3 14B",       "tools": true },
+                "qwen3:8b-16k":        { "name": "Qwen3 8B",        "tools": true }
+            }
+        }
+    },
+    "model": "ollama/qwen3-coder:30b-32k"
+}
+OCEOF
+
+RUN mkdir -p /home/agent/.local/state /home/agent/.local/share/opencode /home/agent/.cache/opencode && \
+    chown -R agent:agent /home/agent
+USER agent
+
+RUN cat >> ~/.bashrc << 'BASH'
+command -v gh  &>/dev/null && ! gh auth status  &>/dev/null 2>&1 && echo "⚠  gh auth login"
+command -v tea &>/dev/null && [ ! -f ~/.config/tea/config.yml ]  && echo "⚠  tea login add"
+BASH
+
+# ── Runtime entrypoint (fix volume ownership) ────────────
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends gosu && rm -rf /var/lib/apt/lists/*
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["bash"]
