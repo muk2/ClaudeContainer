@@ -6,6 +6,13 @@ name: Build container images
 #   - Matrix builds only the Dockerfiles that actually changed in the diff.
 #   - Dockerfile.all (8-10 GB) is intentionally excluded from PR-triggered runs;
 #     trigger it manually via workflow_dispatch with build_all=true when needed.
+#
+# Implementation notes:
+#   - No marketplace actions are used. Forgejo Actions runners may not have
+#     network reach to pull `actions/checkout@v4` or `docker/build-push-action@v6`.
+#     Everything is done with plain `git clone` and `docker build` instead.
+#   - The runner image is assumed to ship git + docker (the default
+#     `gitea/runner-images:ubuntu-latest` and `node:20-bookworm-slim` both do).
 
 on:
   pull_request:
@@ -42,10 +49,43 @@ jobs:
       images: ${{ steps.set-matrix.outputs.images }}
       should_build: ${{ steps.set-matrix.outputs.should_build }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Show runner environment
+        shell: bash
+        run: |
+          set -eu
+          echo "Event: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Base ref: ${{ github.base_ref }}"
+          echo "Head SHA: ${{ github.sha }}"
+          echo "Server URL: ${GITHUB_SERVER_URL:-unset}"
+          echo "Repository: ${GITHUB_REPOSITORY:-unset}"
+          echo "Workspace: ${GITHUB_WORKSPACE:-unset}"
+          echo "--- tools ---"
+          command -v git    && git --version    || echo "git missing"
+          command -v jq     && jq --version     || echo "jq missing"
+          command -v docker && docker --version || echo "docker missing"
+
+      - name: Clone repo and fetch base
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Use GITHUB_SERVER_URL (Forgejo provides this) so the same workflow
+          # works on any Forgejo instance without hardcoding the host.
+          REMOTE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          echo "Cloning $REMOTE"
+
+          git init -q
+          git remote add origin "$REMOTE"
+
+          # Fetch the head SHA plus the base branch so we can diff.
+          # --filter=blob:none keeps the clone small (we only need history/paths).
+          git fetch --filter=blob:none --depth=100 origin "${GITHUB_SHA}"
+          git checkout -q "${GITHUB_SHA}"
+
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --filter=blob:none --depth=100 origin "${GITHUB_BASE_REF}"
+          fi
 
       - name: Compute build matrix
         id: set-matrix
@@ -53,9 +93,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Canary set — built when shared files (entrypoints, workflow itself) change
-          # but no specific Dockerfile did. Keeps a meaningful signal without
-          # full-fanout cost.
+          # Canary set — built when shared files (entrypoints, workflow itself)
+          # change but no specific Dockerfile did. Keeps a meaningful signal
+          # without full-fanout cost.
           CANARY=(
             "claude/python"
             "claude/go"
@@ -69,57 +109,61 @@ jobs:
              && [ "${{ inputs.build_all }}" = "true" ]; then
             echo "workflow_dispatch + build_all=true -> building everything"
             for f in claude/Dockerfile.*; do
+              [ -e "$f" ] || continue
               name="${f#claude/Dockerfile.}"
               IMAGES+=("claude/$name")
             done
             for f in opencodeLLM/Dockerfile.*; do
+              [ -e "$f" ] || continue
               name="${f#opencodeLLM/Dockerfile.}"
               IMAGES+=("opencodeLLM/$name")
             done
           else
             # Diff against the merge target (PR) or previous commit (push)
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              git fetch origin "${{ github.base_ref }}" --depth=1 || true
-              BASE="origin/${{ github.base_ref }}"
+            if [ -n "${GITHUB_BASE_REF:-}" ]; then
+              BASE="origin/${GITHUB_BASE_REF}"
             else
-              BASE="HEAD~1"
+              BASE="${GITHUB_SHA}^"
             fi
-
             echo "Diffing against: $BASE"
-            CHANGED=$(git diff --name-only "$BASE" HEAD || true)
-            echo "Changed files:"
-            echo "$CHANGED"
 
-            SHARED_TOUCHED=false
-            if echo "$CHANGED" | grep -qE \
-                '(claude/forgejo-entrypoint\.sh|opencodeLLM/entrypoint\.sh|\.forgejo/workflows/build-containers\.yml)$'; then
-              SHARED_TOUCHED=true
-            fi
-
-            # Add specific Dockerfiles that changed
-            while IFS= read -r f; do
-              [ -z "$f" ] && continue
-              case "$f" in
-                claude/Dockerfile.*)
-                  name="${f#claude/Dockerfile.}"
-                  # Skip Dockerfile.all unless explicitly opted in via workflow_dispatch
-                  if [ "$name" = "all" ]; then
-                    echo "Skipping Dockerfile.all (use workflow_dispatch to build it)"
-                    continue
-                  fi
-                  IMAGES+=("claude/$name")
-                  ;;
-                opencodeLLM/Dockerfile.*)
-                  name="${f#opencodeLLM/Dockerfile.}"
-                  IMAGES+=("opencodeLLM/$name")
-                  ;;
-              esac
-            done <<< "$CHANGED"
-
-            # If shared file changed but no specific image changed, fall back to canary
-            if [ "$SHARED_TOUCHED" = true ] && [ ${#IMAGES[@]} -eq 0 ]; then
-              echo "Shared file changed but no specific Dockerfile -- using canary set"
+            if ! git rev-parse --verify -q "$BASE" >/dev/null; then
+              echo "WARNING: $BASE not reachable; falling back to canary set"
+              CHANGED=""
               IMAGES=("${CANARY[@]}")
+            else
+              CHANGED=$(git diff --name-only "$BASE" "${GITHUB_SHA}" || true)
+              echo "Changed files:"
+              echo "$CHANGED"
+
+              SHARED_TOUCHED=false
+              if echo "$CHANGED" | grep -qE \
+                  '(claude/forgejo-entrypoint\.sh|opencodeLLM/entrypoint\.sh|\.forgejo/workflows/build-containers\.yml)$'; then
+                SHARED_TOUCHED=true
+              fi
+
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                case "$f" in
+                  claude/Dockerfile.*)
+                    name="${f#claude/Dockerfile.}"
+                    if [ "$name" = "all" ]; then
+                      echo "Skipping Dockerfile.all (use workflow_dispatch to build it)"
+                      continue
+                    fi
+                    IMAGES+=("claude/$name")
+                    ;;
+                  opencodeLLM/Dockerfile.*)
+                    name="${f#opencodeLLM/Dockerfile.}"
+                    IMAGES+=("opencodeLLM/$name")
+                    ;;
+                esac
+              done <<< "$CHANGED"
+
+              if [ "$SHARED_TOUCHED" = true ] && [ ${#IMAGES[@]} -eq 0 ]; then
+                echo "Shared file changed but no specific Dockerfile -- using canary set"
+                IMAGES=("${CANARY[@]}")
+              fi
             fi
           fi
 
@@ -130,9 +174,8 @@ jobs:
             exit 0
           fi
 
-          # Dedupe + emit JSON for the matrix
           UNIQUE=$(printf '%s\n' "${IMAGES[@]}" | sort -u)
-          MATRIX=$(echo "$UNIQUE" | jq -R -s -c 'split("\n") | map(select(length>0))')
+          MATRIX=$(printf '%s\n' "$UNIQUE" | jq -R -s -c 'split("\n") | map(select(length>0))')
           echo "Build matrix: $MATRIX"
           echo "images=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "should_build=true" >> "$GITHUB_OUTPUT"
@@ -151,15 +194,21 @@ jobs:
       matrix:
         image: ${{ fromJson(needs.detect.outputs.images) }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Clone repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          REMOTE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git init -q
+          git remote add origin "$REMOTE"
+          git fetch --depth=1 origin "${GITHUB_SHA}"
+          git checkout -q "${GITHUB_SHA}"
 
       - name: Parse image identifier
         id: parse
         shell: bash
         run: |
           set -euo pipefail
-          # matrix.image is like "claude/python" or "opencodeLLM/oc-python"
           DIR="${{ matrix.image }}"; DIR="${DIR%/*}"
           NAME="${{ matrix.image }}"; NAME="${NAME#*/}"
 
@@ -167,7 +216,6 @@ jobs:
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "dockerfile=${DIR}/Dockerfile.${NAME}" >> "$GITHUB_OUTPUT"
 
-          # Tag: claude-python:ci  /  oc-python:ci   (thrown away after the job)
           if [ "$DIR" = "claude" ]; then
             echo "tag=claude-${NAME}:ci" >> "$GITHUB_OUTPUT"
           else
@@ -178,36 +226,34 @@ jobs:
         shell: bash
         run: |
           # Free up ~10 GB on a stock ubuntu-latest runner before building
-          # large language images.
+          # large language images. Errors are non-fatal — the runner may not
+          # have these paths.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           docker system prune -af --volumes 2>/dev/null || true
-          df -h /
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          df -h / || true
 
       - name: Build ${{ matrix.image }}
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ steps.parse.outputs.dir }}/
-          file: ${{ steps.parse.outputs.dockerfile }}
-          tags: ${{ steps.parse.outputs.tag }}
-          push: false
-          load: true
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build \
+            -f "${{ steps.parse.outputs.dockerfile }}" \
+            -t "${{ steps.parse.outputs.tag }}" \
+            "${{ steps.parse.outputs.dir }}/"
 
       - name: Smoke test ${{ matrix.image }}
         shell: bash
         run: |
-          # Run a no-op as the default user to confirm the image is well-formed
-          # (entrypoint resolves, default CMD doesn't immediately segfault, etc).
-          # Use /bin/true so we don't accidentally launch claude/opencode.
+          set -euo pipefail
+          # /bin/true confirms the image's entrypoint resolves and layers
+          # materialize without launching claude/opencode (which would hang
+          # waiting for stdin).
           docker run --rm --entrypoint /bin/true "${{ steps.parse.outputs.tag }}"
 
   # ─────────────────────────────────────────────────────────
-  # Aggregate result so branch-protection only needs one check
+  # Aggregate result so branch-protection only needs one check.
+  # Treats `detect` failure as a CI failure (NOT "nothing to build").
   # ─────────────────────────────────────────────────────────
   build-result:
     name: All builds succeeded
@@ -218,11 +264,24 @@ jobs:
       - name: Check outcomes
         shell: bash
         run: |
-          if [ "${{ needs.detect.outputs.should_build }}" != "true" ]; then
+          set -eu
+          DETECT="${{ needs.detect.result }}"
+          BUILD="${{ needs.build.result }}"
+          SHOULD="${{ needs.detect.outputs.should_build }}"
+
+          echo "detect.result        = $DETECT"
+          echo "detect.should_build  = $SHOULD"
+          echo "build.result         = $BUILD"
+
+          if [ "$DETECT" != "success" ]; then
+            echo "detect job failed -- treating as CI failure."
+            exit 1
+          fi
+          if [ "$SHOULD" != "true" ]; then
             echo "No Dockerfiles needed building -- nothing to verify."
             exit 0
           fi
-          if [ "${{ needs.build.result }}" != "success" ]; then
+          if [ "$BUILD" != "success" ]; then
             echo "One or more image builds failed."
             exit 1
           fi
