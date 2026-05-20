@@ -26,6 +26,12 @@ Pre-built Docker images with full language toolchains for running [Claude Code](
 
 ---
 
+## Continuous Integration
+
+A Forgejo Actions workflow at [`.forgejo/workflows/build-containers.yml`](.forgejo/workflows/build-containers.yml) builds every Dockerfile touched by a pull request to make sure the image still assembles. It is path-filtered so PRs that only touch the README or docs don't burn runner time, and only the Dockerfiles whose contents changed in the diff are rebuilt. `Dockerfile.all` is excluded from automatic runs because of its size; build it manually via the workflow's `workflow_dispatch` trigger with `build_all=true` when you need full coverage.
+
+---
+
 ## Mac Setup
 
 ### Step 1: Install a Container Runtime
