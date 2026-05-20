@@ -147,11 +147,23 @@ jobs:
           printf '  %s\n' "${REAL[@]}"
 
           # ── 4. Lint ──
+          # hadolint's parser doesn't handle multi-line heredocs in RUN
+          # (https://github.com/hadolint/hadolint/issues/784). Detect parse
+          # failures (output contains 'unexpected ... expecting') and treat
+          # them as warnings instead of CI failures. Real rule violations
+          # at error severity still fail the job.
           FAILED=0
+          SKIPPED=0
           for f in "${REAL[@]}"; do
             echo ""
             echo "════════════ $f ════════════"
-            hadolint --no-fail "$f"
+            OUT=$(hadolint --no-fail "$f" 2>&1)
+            echo "$OUT"
+            if echo "$OUT" | grep -qE 'unexpected .* expecting'; then
+              echo "WARN: hadolint can't parse $f (likely heredoc/RUN <<EOF) -- skipping rule check"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
             if ! hadolint --failure-threshold error "$f" >/dev/null 2>&1; then
               echo ">>> ERROR-level issues in $f"
               FAILED=$((FAILED + 1))
@@ -159,8 +171,8 @@ jobs:
           done
 
           echo ""
+          echo "Summary: ${#REAL[@]} file(s) checked, $SKIPPED skipped (parser limitation), $FAILED failed"
           if [ "$FAILED" -gt 0 ]; then
-            echo "$FAILED Dockerfile(s) had error-level issues."
             exit 1
           fi
           echo "All Dockerfiles passed hadolint."
