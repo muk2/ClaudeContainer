@@ -76,19 +76,29 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: bash
         env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          AUTO_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
+          DEBUG_TOKEN: ${{ secrets.CI_DEBUG_TOKEN }}
+          PR_NUMBER:   ${{ github.event.pull_request.number }}
         run: |
           set +e
-          if [ -z "${TOKEN:-}" ]; then
-            echo "GITHUB_TOKEN secret is empty -- cannot post comment."
+          # Prefer the debug token (user PAT) since the auto-injected
+          # GITHUB_TOKEN may not be available on this Forgejo instance.
+          TOKEN="${DEBUG_TOKEN:-$AUTO_TOKEN}"
+          WHICH="debug"
+          if [ -z "$DEBUG_TOKEN" ] && [ -n "$AUTO_TOKEN" ]; then
+            WHICH="auto"
+          fi
+          if [ -z "$TOKEN" ]; then
+            echo "Both tokens empty -- cannot post comment."
             exit 0
           fi
+          echo "Using $WHICH token (len=${#TOKEN})"
+
           BODY=$(jq -Rs . < "${{ steps.gather.outputs.out }}")
-          URL="${GITHUB_API_URL:-${GITHUB_SERVER_URL}/api/v1}/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+          URL="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
           echo "POST $URL"
-          /usr/bin/curl -sv -X POST \
+          curl -sv -X POST \
             -H "Authorization: token ${TOKEN}" \
             -H "Content-Type: application/json" \
             -d "{\"body\": $BODY}" \
-            "$URL" 2>&1 | tail -30
+            "$URL" 2>&1 | tail -25
