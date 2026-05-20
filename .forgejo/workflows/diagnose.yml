@@ -1,0 +1,94 @@
+name: CI diagnose
+
+# Self-reporting diagnostic workflow. Since we currently can't access
+# Forgejo Actions logs via the API, this workflow writes its findings
+# back to the PR as a comment so we can see what the runner environment
+# actually looks like. Delete this file once build-containers.yml is healthy.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  diag:
+    name: Diagnose runner environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gather environment info
+        id: gather
+        shell: bash
+        run: |
+          set +e
+          OUT="$RUNNER_TEMP/diag.md"
+          {
+            echo "## CI runner diagnostics"
+            echo ""
+            echo "Commit: \`${GITHUB_SHA}\`"
+            echo "Event: \`${GITHUB_EVENT_NAME}\`"
+            echo "Run: \`${GITHUB_RUN_ID}\` / \`${GITHUB_RUN_NUMBER}\`"
+            echo ""
+            echo "### Identity"
+            echo '```'
+            echo "hostname: $(hostname 2>&1)"
+            echo "whoami:   $(whoami 2>&1)"
+            echo "id:       $(id 2>&1)"
+            echo "pwd:      $(pwd 2>&1)"
+            echo "uname:    $(uname -a 2>&1)"
+            echo "os-release:"
+            (cat /etc/os-release 2>&1 || echo "no /etc/os-release") | sed 's/^/  /'
+            echo '```'
+            echo ""
+            echo "### Tools"
+            echo '```'
+            for cmd in bash sh git docker buildx jq curl wget node python python3 podman; do
+              v=$(command -v "$cmd" 2>/dev/null)
+              if [ -n "$v" ]; then
+                ver=$("$cmd" --version 2>&1 | head -1)
+                printf '%-10s %-50s %s\n' "$cmd" "$v" "$ver"
+              else
+                printf '%-10s MISSING\n' "$cmd"
+              fi
+            done
+            echo '```'
+            echo ""
+            echo "### Docker reachability"
+            echo '```'
+            docker info 2>&1 | head -25
+            echo '```'
+            echo ""
+            echo "### Disk"
+            echo '```'
+            df -h / "$RUNNER_TEMP" 2>&1 | head -5
+            echo '```'
+            echo ""
+            echo "### Environment (filtered)"
+            echo '```'
+            env | sort | grep -Ev '^(GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN)' | head -60
+            echo '```'
+          } > "$OUT" 2>&1
+          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+          echo "--- begin diag.md ---"
+          cat "$OUT"
+          echo "--- end diag.md ---"
+
+      - name: Post diagnostics as PR comment
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set +e
+          if [ -z "${TOKEN:-}" ]; then
+            echo "GITHUB_TOKEN secret is empty -- cannot post comment."
+            exit 0
+          fi
+          BODY=$(jq -Rs . < "${{ steps.gather.outputs.out }}")
+          URL="${GITHUB_API_URL:-${GITHUB_SERVER_URL}/api/v1}/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+          echo "POST $URL"
+          /usr/bin/curl -sv -X POST \
+            -H "Authorization: token ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\": $BODY}" \
+            "$URL" 2>&1 | tail -30
