@@ -72,33 +72,41 @@ jobs:
           cat "$OUT"
           echo "--- end diag.md ---"
 
-      - name: Post diagnostics as PR comment
-        if: github.event_name == 'pull_request'
+      - name: Push diagnostics to ci-debug branch
         shell: bash
         env:
-          AUTO_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
           DEBUG_TOKEN: ${{ secrets.CI_DEBUG_TOKEN }}
-          PR_NUMBER:   ${{ github.event.pull_request.number }}
         run: |
-          set +e
-          # Prefer the debug token (user PAT) since the auto-injected
-          # GITHUB_TOKEN may not be available on this Forgejo instance.
-          TOKEN="${DEBUG_TOKEN:-$AUTO_TOKEN}"
-          WHICH="debug"
-          if [ -z "$DEBUG_TOKEN" ] && [ -n "$AUTO_TOKEN" ]; then
-            WHICH="auto"
+          set -e
+          if [ -z "${DEBUG_TOKEN:-}" ]; then
+            echo "CI_DEBUG_TOKEN secret is empty"
+            exit 1
           fi
-          if [ -z "$TOKEN" ]; then
-            echo "Both tokens empty -- cannot post comment."
-            exit 0
-          fi
-          echo "Using $WHICH token (len=${#TOKEN})"
+          OUT="${{ steps.gather.outputs.out }}"
+          WORK=$(mktemp -d)
+          cd "$WORK"
+          # Server URL strip http:// for inline-credential format
+          BASEURL="${GITHUB_SERVER_URL#http://}"
+          BASEURL="${BASEURL#https://}"
+          REMOTE="http://oauth2:${DEBUG_TOKEN}@${BASEURL}/${GITHUB_REPOSITORY}.git"
 
-          BODY=$(jq -Rs . < "${{ steps.gather.outputs.out }}")
-          URL="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
-          echo "POST $URL"
-          curl -sv -X POST \
-            -H "Authorization: token ${TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"body\": $BODY}" \
-            "$URL" 2>&1 | tail -25
+          git init -q
+          git config user.email "ci@forgejo"
+          git config user.name "ci-debug"
+          git remote add origin "$REMOTE"
+
+          # Try to fetch the existing ci-debug branch (may not exist)
+          git fetch --depth=1 origin ci-debug 2>/dev/null && \
+            git checkout -B ci-debug FETCH_HEAD || \
+            git checkout --orphan ci-debug
+
+          # Always start clean
+          git rm -rf . 2>/dev/null || true
+          STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          cp "$OUT" "diag-${STAMP}.md"
+          cp "$OUT" "diag-latest.md"
+
+          git add diag-*.md
+          git commit -m "diag: run ${GITHUB_RUN_NUMBER} (${GITHUB_SHA:0:8})"
+          git push -f origin ci-debug
+          echo "Pushed diag-${STAMP}.md to ci-debug branch"
