@@ -1,18 +1,20 @@
 name: Build container images
 
-# Validate that every Dockerfile touched by a PR still builds.
-# Designed to stay cheap on a self-hosted Forgejo runner:
-#   - Path-filtered so unrelated PRs (README, docs, shell aliases) skip this entirely.
-#   - Matrix builds only the Dockerfiles that actually changed in the diff.
-#   - Dockerfile.all (8-10 GB) is intentionally excluded from PR-triggered runs;
-#     trigger it manually via workflow_dispatch with build_all=true when needed.
+# Validates Dockerfiles on every PR. Runs on a runner that does NOT have
+# Docker available (act_runner with node:20-bookworm-slim image), so a real
+# `docker build` is impossible. Instead this workflow:
 #
-# Implementation notes:
-#   - No marketplace actions are used. Forgejo Actions runners may not have
-#     network reach to pull `actions/checkout@v4` or `docker/build-push-action@v6`.
-#     Everything is done with plain `git clone` and `docker build` instead.
-#   - The runner image is assumed to ship git + docker (the default
-#     `gitea/runner-images:ubuntu-latest` and `node:20-bookworm-slim` both do).
+#   1. Statically lints each changed Dockerfile with `hadolint` to catch
+#      syntax errors, broken RUN chains, missing version pins, etc.
+#   2. Verifies the Dockerfile parses (`docker build --check`-equivalent
+#      done via hadolint's BuildKit-aware rule set).
+#
+# To run REAL `docker build` in CI you must either:
+#   - Configure the act_runner to mount /var/run/docker.sock from the host
+#     into the job container (forgejo-runner config.yaml: `docker_host`).
+#   - Or switch the runner image to one that ships docker-in-docker
+#     (e.g. catthehacker/ubuntu:full).
+# Until that happens, hadolint is the closest we can get on this runner.
 
 on:
   pull_request:
@@ -33,256 +35,150 @@ on:
       - '.forgejo/workflows/build-containers.yml'
   workflow_dispatch:
     inputs:
-      build_all:
-        description: "Build every Dockerfile, including Dockerfile.all"
+      lint_all:
+        description: "Lint every Dockerfile, not just changed ones"
         type: boolean
         default: false
 
 jobs:
-  # ─────────────────────────────────────────────────────────
-  # Detect which Dockerfiles need building based on the diff
-  # ─────────────────────────────────────────────────────────
-  detect:
-    name: Detect changed Dockerfiles
+  lint:
+    name: Lint changed Dockerfiles
     runs-on: ubuntu-latest
-    outputs:
-      images: ${{ steps.set-matrix.outputs.images }}
-      should_build: ${{ steps.set-matrix.outputs.should_build }}
     steps:
-      - name: Show runner environment
+      - name: Clone repo
         shell: bash
         run: |
-          set -eu
-          echo "Event: ${{ github.event_name }}"
-          echo "Ref: ${{ github.ref }}"
-          echo "Base ref: ${{ github.base_ref }}"
-          echo "Head SHA: ${{ github.sha }}"
-          echo "Server URL: ${GITHUB_SERVER_URL:-unset}"
-          echo "Repository: ${GITHUB_REPOSITORY:-unset}"
-          echo "Workspace: ${GITHUB_WORKSPACE:-unset}"
-          echo "--- tools ---"
-          command -v git    && git --version    || echo "git missing"
-          command -v jq     && jq --version     || echo "jq missing"
-          command -v docker && docker --version || echo "docker missing"
-
-      - name: Clone repo and fetch base
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # Use GITHUB_SERVER_URL (Forgejo provides this) so the same workflow
-          # works on any Forgejo instance without hardcoding the host.
-          REMOTE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          echo "Cloning $REMOTE"
-
+          set -e
+          # Workspace may already be populated; clean-init either way.
+          rm -rf .git
           git init -q
-          git remote add origin "$REMOTE"
-
-          # Fetch the head SHA plus the base branch so we can diff.
-          # --filter=blob:none keeps the clone small (we only need history/paths).
-          git fetch --filter=blob:none --depth=100 origin "${GITHUB_SHA}"
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=50 origin "${GITHUB_SHA}"
           git checkout -q "${GITHUB_SHA}"
-
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            git fetch --filter=blob:none --depth=100 origin "${GITHUB_BASE_REF}"
+            git fetch --depth=50 origin "${GITHUB_BASE_REF}"
           fi
 
-      - name: Compute build matrix
-        id: set-matrix
+      - name: Install hadolint
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
+          # Pick arch for the released binary.
+          case "$(uname -m)" in
+            aarch64|arm64) HADO_ARCH=arm64 ;;
+            x86_64|amd64)  HADO_ARCH=x86_64 ;;
+            *) echo "Unsupported arch: $(uname -m)"; exit 1 ;;
+          esac
+          # Download the hadolint binary. Mirrored on github.com — if that's
+          # blocked we fall back to apt's hadolint (older but functional).
+          if curl -fsSL -o /tmp/hadolint \
+              "https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-${HADO_ARCH}"; then
+            chmod +x /tmp/hadolint
+            sudo mv /tmp/hadolint /usr/local/bin/hadolint
+          else
+            echo "github.com unreachable; falling back to apt"
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq hadolint || {
+              echo "hadolint not in apt either; aborting"
+              exit 1
+            }
+          fi
+          hadolint --version
 
-          # Canary set — built when shared files (entrypoints, workflow itself)
-          # change but no specific Dockerfile did. Keeps a meaningful signal
-          # without full-fanout cost.
-          CANARY=(
-            "claude/python"
-            "claude/go"
-            "opencodeLLM/oc-python"
-            "opencodeLLM/oc-go"
-          )
-
-          IMAGES=()
+      - name: Determine which Dockerfiles to lint
+        id: pick
+        shell: bash
+        run: |
+          set -e
+          TARGETS=""
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-             && [ "${{ inputs.build_all }}" = "true" ]; then
-            echo "workflow_dispatch + build_all=true -> building everything"
-            for f in claude/Dockerfile.*; do
-              [ -e "$f" ] || continue
-              name="${f#claude/Dockerfile.}"
-              IMAGES+=("claude/$name")
-            done
-            for f in opencodeLLM/Dockerfile.*; do
-              [ -e "$f" ] || continue
-              name="${f#opencodeLLM/Dockerfile.}"
-              IMAGES+=("opencodeLLM/$name")
-            done
+             && [ "${{ inputs.lint_all }}" = "true" ]; then
+            TARGETS=$(printf '%s\n' claude/Dockerfile.* opencodeLLM/Dockerfile.* 2>/dev/null \
+                     | grep -v '\*$' || true)
           else
-            # Diff against the merge target (PR) or previous commit (push)
+            BASE=""
             if [ -n "${GITHUB_BASE_REF:-}" ]; then
               BASE="origin/${GITHUB_BASE_REF}"
             else
               BASE="${GITHUB_SHA}^"
             fi
-            echo "Diffing against: $BASE"
-
-            if ! git rev-parse --verify -q "$BASE" >/dev/null; then
-              echo "WARNING: $BASE not reachable; falling back to canary set"
-              CHANGED=""
-              IMAGES=("${CANARY[@]}")
-            else
+            if git rev-parse --verify -q "$BASE" >/dev/null; then
+              echo "Diffing against: $BASE"
               CHANGED=$(git diff --name-only "$BASE" "${GITHUB_SHA}" || true)
-              echo "Changed files:"
-              echo "$CHANGED"
+            else
+              echo "Base $BASE not reachable; falling back to listing all Dockerfiles"
+              CHANGED=$(printf '%s\n' claude/Dockerfile.* opencodeLLM/Dockerfile.* 2>/dev/null \
+                       | grep -v '\*$' || true)
+            fi
+            echo "--- changed files ---"
+            echo "$CHANGED"
+            echo "----------------------"
 
-              SHARED_TOUCHED=false
-              if echo "$CHANGED" | grep -qE \
-                  '(claude/forgejo-entrypoint\.sh|opencodeLLM/entrypoint\.sh|\.forgejo/workflows/build-containers\.yml)$'; then
-                SHARED_TOUCHED=true
-              fi
+            SHARED=false
+            if echo "$CHANGED" | grep -qE \
+                '(claude/forgejo-entrypoint\.sh|opencodeLLM/entrypoint\.sh|\.forgejo/workflows/build-containers\.yml)$'; then
+              SHARED=true
+            fi
 
-              while IFS= read -r f; do
-                [ -z "$f" ] && continue
-                case "$f" in
-                  claude/Dockerfile.*)
-                    name="${f#claude/Dockerfile.}"
-                    if [ "$name" = "all" ]; then
-                      echo "Skipping Dockerfile.all (use workflow_dispatch to build it)"
-                      continue
-                    fi
-                    IMAGES+=("claude/$name")
-                    ;;
-                  opencodeLLM/Dockerfile.*)
-                    name="${f#opencodeLLM/Dockerfile.}"
-                    IMAGES+=("opencodeLLM/$name")
-                    ;;
-                esac
-              done <<< "$CHANGED"
+            TARGETS=$(echo "$CHANGED" | grep -E '^(claude|opencodeLLM)/Dockerfile\.' || true)
 
-              if [ "$SHARED_TOUCHED" = true ] && [ ${#IMAGES[@]} -eq 0 ]; then
-                echo "Shared file changed but no specific Dockerfile -- using canary set"
-                IMAGES=("${CANARY[@]}")
-              fi
+            if [ "$SHARED" = "true" ] && [ -z "$TARGETS" ]; then
+              echo "Shared file changed; linting canary set"
+              TARGETS=$'claude/Dockerfile.python\nclaude/Dockerfile.go\nopencodeLLM/Dockerfile.oc-python\nopencodeLLM/Dockerfile.oc-go'
             fi
           fi
 
-          if [ ${#IMAGES[@]} -eq 0 ]; then
-            echo "No images to build"
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
-            echo "images=[]" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          # Verify each target file actually exists (renames in the diff
+          # can list old paths).
+          REAL=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if [ -f "$f" ]; then
+              REAL="${REAL}${f}"$'\n'
+            else
+              echo "Skipping nonexistent: $f"
+            fi
+          done <<< "$TARGETS"
 
-          UNIQUE=$(printf '%s\n' "${IMAGES[@]}" | sort -u)
-          MATRIX=$(printf '%s\n' "$UNIQUE" | jq -R -s -c 'split("\n") | map(select(length>0))')
-          echo "Build matrix: $MATRIX"
-          echo "images=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "should_build=true" >> "$GITHUB_OUTPUT"
-
-  # ─────────────────────────────────────────────────────────
-  # One job per changed Dockerfile, fanned out in parallel
-  # ─────────────────────────────────────────────────────────
-  build:
-    name: Build ${{ matrix.image }}
-    needs: detect
-    if: needs.detect.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 3
-      matrix:
-        image: ${{ fromJson(needs.detect.outputs.images) }}
-    steps:
-      - name: Clone repo
-        shell: bash
-        run: |
-          set -euo pipefail
-          REMOTE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git init -q
-          git remote add origin "$REMOTE"
-          git fetch --depth=1 origin "${GITHUB_SHA}"
-          git checkout -q "${GITHUB_SHA}"
-
-      - name: Parse image identifier
-        id: parse
-        shell: bash
-        run: |
-          set -euo pipefail
-          DIR="${{ matrix.image }}"; DIR="${DIR%/*}"
-          NAME="${{ matrix.image }}"; NAME="${NAME#*/}"
-
-          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-          echo "dockerfile=${DIR}/Dockerfile.${NAME}" >> "$GITHUB_OUTPUT"
-
-          if [ "$DIR" = "claude" ]; then
-            echo "tag=claude-${NAME}:ci" >> "$GITHUB_OUTPUT"
+          # Strip trailing newline and stash for next step.
+          printf '%s' "${REAL%$'\n'}" > /tmp/targets.txt
+          if [ -s /tmp/targets.txt ]; then
+            echo "Will lint:"
+            cat /tmp/targets.txt | sed 's/^/  /'
+            echo "has_targets=true" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${NAME}:ci" >> "$GITHUB_OUTPUT"
+            echo "Nothing to lint."
+            echo "has_targets=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Reclaim disk space
+      - name: Lint Dockerfiles
+        if: steps.pick.outputs.has_targets == 'true'
         shell: bash
         run: |
-          # Free up ~10 GB on a stock ubuntu-latest runner before building
-          # large language images. Errors are non-fatal — the runner may not
-          # have these paths.
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL 2>/dev/null || true
-          docker system prune -af --volumes 2>/dev/null || true
-          df -h / || true
+          set -e
+          FAILED=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "  $f"
+            echo "════════════════════════════════════════════════════════════"
+            # --no-fail keeps hadolint exit code at 0 even on warnings.
+            # We want WARNINGS to be informational but ERRORS to fail the job,
+            # so we run twice: once for the human-readable report, once to
+            # decide the exit code based on severity 'error' only.
+            hadolint --no-fail "$f" || true
+            if ! hadolint --failure-threshold error "$f" >/dev/null 2>&1; then
+              echo ">>> ERROR-level issues in $f"
+              FAILED=$((FAILED + 1))
+            fi
+          done < /tmp/targets.txt
 
-      - name: Build ${{ matrix.image }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker build \
-            -f "${{ steps.parse.outputs.dockerfile }}" \
-            -t "${{ steps.parse.outputs.tag }}" \
-            "${{ steps.parse.outputs.dir }}/"
-
-      - name: Smoke test ${{ matrix.image }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # /bin/true confirms the image's entrypoint resolves and layers
-          # materialize without launching claude/opencode (which would hang
-          # waiting for stdin).
-          docker run --rm --entrypoint /bin/true "${{ steps.parse.outputs.tag }}"
-
-  # ─────────────────────────────────────────────────────────
-  # Aggregate result so branch-protection only needs one check.
-  # Treats `detect` failure as a CI failure (NOT "nothing to build").
-  # ─────────────────────────────────────────────────────────
-  build-result:
-    name: All builds succeeded
-    runs-on: ubuntu-latest
-    needs: [detect, build]
-    if: always()
-    steps:
-      - name: Check outcomes
-        shell: bash
-        run: |
-          set -eu
-          DETECT="${{ needs.detect.result }}"
-          BUILD="${{ needs.build.result }}"
-          SHOULD="${{ needs.detect.outputs.should_build }}"
-
-          echo "detect.result        = $DETECT"
-          echo "detect.should_build  = $SHOULD"
-          echo "build.result         = $BUILD"
-
-          if [ "$DETECT" != "success" ]; then
-            echo "detect job failed -- treating as CI failure."
+          if [ "$FAILED" -gt 0 ]; then
+            echo ""
+            echo "$FAILED Dockerfile(s) had error-level issues."
             exit 1
           fi
-          if [ "$SHOULD" != "true" ]; then
-            echo "No Dockerfiles needed building -- nothing to verify."
-            exit 0
-          fi
-          if [ "$BUILD" != "success" ]; then
-            echo "One or more image builds failed."
-            exit 1
-          fi
-          echo "All image builds succeeded."
+          echo ""
+          echo "All Dockerfiles passed hadolint."
