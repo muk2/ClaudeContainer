@@ -90,6 +90,8 @@ jobs:
       matrix:
         target: ${{ fromJSON(needs.detect.outputs.targets) }}
     timeout-minutes: 60
+    env:
+      DOCKER_BUILDKIT: 1
     steps:
       - uses: actions/checkout@v4
 
@@ -103,7 +105,9 @@ jobs:
           echo "Building ${{ matrix.target.name }}"
           echo "  Dockerfile: ${{ matrix.target.file }}"
           echo "  Context:    ${{ matrix.target.context }}"
-          docker build \
+          docker buildx create --use --name ci-builder 2>/dev/null || true
+          docker buildx build \
+            --load \
             --progress=plain \
             -t "${{ matrix.target.name }}:ci" \
             -f "${{ matrix.target.file }}" \
