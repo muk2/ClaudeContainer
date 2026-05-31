@@ -44,6 +44,7 @@ jobs:
               local base; base="$(basename "$f")"
               local variant="${base#Dockerfile.}"
               local name="${dir////-}-${variant}"
+              name="${name,,}"
               printf '{"name":"%s","file":"%s","context":"%s"}' "$name" "$f" "$dir"
             done
             printf ']'
