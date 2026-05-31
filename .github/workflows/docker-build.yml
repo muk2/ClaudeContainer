@@ -6,21 +6,14 @@ on:
     paths:
       - 'claude/Dockerfile.*'
       - 'opencodeLLM/Dockerfile.*'
-      - 'opencodeLLM/entrypoint.sh'
       - '.github/workflows/docker-build.yml'
   push:
     branches: [main]
     paths:
       - 'claude/Dockerfile.*'
       - 'opencodeLLM/Dockerfile.*'
-      - 'opencodeLLM/entrypoint.sh'
       - '.github/workflows/docker-build.yml'
   workflow_dispatch:
-    inputs:
-      build_all:
-        description: Build every Dockerfile (default: only changed)
-        type: boolean
-        default: false
 
 concurrency:
   group: docker-build-${{ github.ref }}
@@ -41,7 +34,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Build JSON array of {name, file, context}
           to_json() {
             local first=true
             printf '['
@@ -58,32 +50,18 @@ jobs:
           }
 
           case "${GITHUB_EVENT_NAME}" in
-            workflow_dispatch)
-              if [[ "${{ inputs.build_all }}" == "true" ]]; then
-                FILES=(claude/Dockerfile.* opencodeLLM/Dockerfile.*)
-              else
-                FILES=()
-              fi
-              ;;
-            push)
+            workflow_dispatch|push)
               FILES=(claude/Dockerfile.* opencodeLLM/Dockerfile.*)
               ;;
             pull_request)
-              git fetch --depth=1 origin "${{ github.event.pull_request.base.sha }}" 2>/dev/null || true
+              BASE_SHA="${{ github.event.pull_request.base.sha }}"
+              git fetch --depth=1 origin "$BASE_SHA" 2>/dev/null || true
               readarray -t CHANGED < <(
-                git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- \
+                git diff --name-only "$BASE_SHA"...HEAD -- \
                   'claude/Dockerfile.*' 'opencodeLLM/Dockerfile.*' 2>/dev/null || true
               )
               if [ ${#CHANGED[@]} -eq 0 ]; then
-                readarray -t SHARED < <(
-                  git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- \
-                    'opencodeLLM/entrypoint.sh' '.github/workflows/docker-build.yml' 2>/dev/null || true
-                )
-                if [ ${#SHARED[@]} -gt 0 ]; then
-                  FILES=(claude/Dockerfile.python claude/Dockerfile.go opencodeLLM/Dockerfile.oc-python opencodeLLM/Dockerfile.oc-go)
-                else
-                  FILES=()
-                fi
+                FILES=(claude/Dockerfile.python claude/Dockerfile.go opencodeLLM/Dockerfile.oc-python opencodeLLM/Dockerfile.oc-go)
               else
                 FILES=("${CHANGED[@]}")
               fi
@@ -132,5 +110,6 @@ jobs:
 
       - name: Image size
         run: |
-          SIZE=$(docker image inspect "${{ matrix.target.name }}:ci" --format '{{ .Size }}' 2>/dev/null || echo 0)
+          SIZE=$(docker image inspect "${{ matrix.target.name }}:ci" \
+            --format '{{ .Size }}' 2>/dev/null || echo 0)
           echo "Image size: $(numfmt --to=iec $SIZE)"
