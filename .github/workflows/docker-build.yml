@@ -1,0 +1,136 @@
+name: Docker Build
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'claude/Dockerfile.*'
+      - 'opencodeLLM/Dockerfile.*'
+      - 'opencodeLLM/entrypoint.sh'
+      - '.github/workflows/docker-build.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'claude/Dockerfile.*'
+      - 'opencodeLLM/Dockerfile.*'
+      - 'opencodeLLM/entrypoint.sh'
+      - '.github/workflows/docker-build.yml'
+  workflow_dispatch:
+    inputs:
+      build_all:
+        description: Build every Dockerfile (default: only changed)
+        type: boolean
+        default: false
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.detect.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed Dockerfiles
+        id: detect
+        run: |
+          set -euo pipefail
+
+          # Build JSON array of {name, file, context}
+          to_json() {
+            local first=true
+            printf '['
+            for f; do
+              $first || printf ','
+              first=false
+              local dir; dir="$(dirname "$f")"
+              local base; base="$(basename "$f")"
+              local variant="${base#Dockerfile.}"
+              local name="${dir////-}-${variant}"
+              printf '{"name":"%s","file":"%s","context":"%s"}' "$name" "$f" "$dir"
+            done
+            printf ']'
+          }
+
+          case "${GITHUB_EVENT_NAME}" in
+            workflow_dispatch)
+              if [[ "${{ inputs.build_all }}" == "true" ]]; then
+                FILES=(claude/Dockerfile.* opencodeLLM/Dockerfile.*)
+              else
+                FILES=()
+              fi
+              ;;
+            push)
+              FILES=(claude/Dockerfile.* opencodeLLM/Dockerfile.*)
+              ;;
+            pull_request)
+              git fetch --depth=1 origin "${{ github.event.pull_request.base.sha }}" 2>/dev/null || true
+              readarray -t CHANGED < <(
+                git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- \
+                  'claude/Dockerfile.*' 'opencodeLLM/Dockerfile.*' 2>/dev/null || true
+              )
+              if [ ${#CHANGED[@]} -eq 0 ]; then
+                readarray -t SHARED < <(
+                  git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- \
+                    'opencodeLLM/entrypoint.sh' '.github/workflows/docker-build.yml' 2>/dev/null || true
+                )
+                if [ ${#SHARED[@]} -gt 0 ]; then
+                  FILES=(claude/Dockerfile.python claude/Dockerfile.go opencodeLLM/Dockerfile.oc-python opencodeLLM/Dockerfile.oc-go)
+                else
+                  FILES=()
+                fi
+              else
+                FILES=("${CHANGED[@]}")
+              fi
+              ;;
+            *)
+              FILES=()
+              ;;
+          esac
+
+          EXIST=()
+          for f in "${FILES[@]}"; do
+            [ -f "$f" ] && EXIST+=("$f")
+          done
+
+          JSON=$(to_json "${EXIST[@]}")
+          echo "targets=$JSON" >> "$GITHUB_OUTPUT"
+          echo "Targets: $JSON"
+
+  build:
+    needs: detect
+    if: ${{ fromJSON(needs.detect.outputs.targets)[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.detect.outputs.targets) }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+          df -h /
+
+      - name: Build ${{ matrix.target.name }}
+        run: |
+          echo "Building ${{ matrix.target.name }}"
+          echo "  Dockerfile: ${{ matrix.target.file }}"
+          echo "  Context:    ${{ matrix.target.context }}"
+          docker build \
+            --progress=plain \
+            -t "${{ matrix.target.name }}:ci" \
+            -f "${{ matrix.target.file }}" \
+            "${{ matrix.target.context }}"
+
+      - name: Image size
+        run: |
+          SIZE=$(docker image inspect "${{ matrix.target.name }}:ci" --format '{{ .Size }}' 2>/dev/null || echo 0)
+          echo "Image size: $(numfmt --to=iec $SIZE)"
