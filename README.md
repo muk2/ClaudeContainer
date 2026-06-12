@@ -21,8 +21,9 @@ Pre-built Docker images with full language toolchains for running [Claude Code](
 | `claude-ocaml` | OCaml 5.2, opam, dune, Jane Street core, async | ~1.3GB |
 | `claude-lean` | Lean 4, elan, Lake | ~600MB |
 | `claude-csharp` | .NET SDK 9 + 8, dotnet-ef, BenchmarkDotNet | ~1.5GB |
+| `claude-swift` | Swift 6.0.3, swift-format, SourceKit-LSP, lldb | ~3GB |
 | `claude-zig` | Zig 0.13, ZLS | ~600MB |
-| `claude-all` | Everything above in one image | ~8-10GB |
+| `claude-all` | Everything above in one image | ~10-12GB |
 
 ---
 
@@ -169,6 +170,7 @@ source ~/.zshrc
 
 ```bash
 sb-lang rust
+sb-lang swift
 ```
 
 Takes 5-15 minutes the first time. Cached after that — only rebuild if you edit the Dockerfile.
@@ -177,6 +179,7 @@ Takes 5-15 minutes the first time. Cached after that — only rebuild if you edi
 
 ```bash
 sb rust ~/projects/my-app
+sb swift ~/projects/my-app
 ```
 
 On the **first run only**, Claude Code prompts you to log in via browser. After that, every `sb` command skips login automatically.
@@ -372,6 +375,7 @@ Save, close, reload:
 sb-lang rust
 sb-lang python
 sb-lang js
+sb-lang swift
 
 # Start Claude in a project
 cd C:\Users\YourName\projects\my-app
@@ -379,6 +383,7 @@ sb rust
 
 # Or with explicit path
 sb rust C:\Users\YourName\projects\my-app
+sb swift C:\Users\YourName\projects\swift-app
 
 # Or current directory (default)
 sb rust
@@ -395,12 +400,14 @@ First run will prompt browser login. After that, the `claude-config` volume save
 sb-lang rust              # Build Rust image
 sb-lang python            # Build Python image
 sb-lang js                # Build JS/TS image
+sb-lang swift             # Build Swift image
 sb-lang all               # Build mega image
 
 # Run
 sb rust                   # Current dir, Rust toolchain
 sb python .               # Current dir, Python
 sb go C:\path\to\project  # Specific path, Go
+sb swift .                # Current dir, Swift toolchain
 
 # Side terminal (new PowerShell window while Claude runs)
 sb-shell                  # Current dir
@@ -462,6 +469,12 @@ mkdir $HOME\practice\rust
 cd $HOME\practice\rust
 sb rust
 # Ask Claude to build ownership/lifetime exercises
+
+sb-lang swift
+mkdir $HOME\practice\swift
+cd $HOME\practice\swift
+sb swift
+# Ask Claude to teach you Swift concurrency and protocol-oriented programming
 ```
 
 ---
