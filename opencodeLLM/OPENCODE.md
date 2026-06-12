@@ -116,6 +116,7 @@ _oc_run() {
 
 # Launch OpenCode TUI
 # Usage: oc <lang> [path] [-p <provider>]
+# Supported languages: base, rust, python, go, js, c, cpp, csharp, zig, lean, ocaml, swift
 oc() {
     local lang="${1:-base}"; shift
     local project="." provider=""
@@ -268,6 +269,7 @@ oc-lang csharp     # + .NET SDK 9 + 8, dotnet-ef, csharpier (~1.5GB)
 oc-lang zig        # + Zig 0.13, ZLS (~700MB)
 oc-lang lean       # + Lean 4, elan, Lake (~700MB)
 oc-lang ocaml      # + OCaml 5.2, opam, dune, Jane Street core (~1.3GB)
+oc-lang swift      # + Swift 6.0, swift-format, SourceKit-LSP, lldb (~3GB)
 ```
 
 ### 6. Authenticate (One-Time)
@@ -315,6 +317,7 @@ oc csharp
 oc zig
 oc lean
 oc ocaml
+oc swift
 
 # With a specific provider
 oc rust -p groq
@@ -451,6 +454,7 @@ Every image includes: OpenCode, GitHub CLI (`gh`), Gitea CLI (`tea`), git, git-l
 | `oc-zig` | Zig 0.13 | ZLS (Zig Language Server) | ~700MB |
 | `oc-lean` | Lean 4 | elan, Lake | ~700MB |
 | `oc-ocaml` | OCaml 5.2 | opam, dune, utop, merlin, ocaml-lsp-server, Jane Street core, async | ~1.3GB |
+| `oc-swift` | Swift 6.0.3 | swift-format, SourceKit-LSP, lldb | ~3GB |
 
 ---
 
@@ -484,7 +488,8 @@ opencode-containers/
 ├── Dockerfile.oc-csharp      # OpenCode + C#
 ├── Dockerfile.oc-zig         # OpenCode + Zig
 ├── Dockerfile.oc-lean        # OpenCode + Lean 4
-└── Dockerfile.oc-ocaml       # OpenCode + OCaml
+├── Dockerfile.oc-ocaml       # OpenCode + OCaml
+└── Dockerfile.oc-swift       # OpenCode + Swift
 ```
 
 ---
