@@ -60,3 +60,7 @@ ENV PATH="/home/agent/.npm-global/bin:${PATH}"
 USER agent
 
 RUN echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> /home/agent/.bashrc
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent

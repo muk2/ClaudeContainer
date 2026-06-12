@@ -25,3 +25,7 @@ USER agent
 # ── Shell setup ──────────────────────────────────────────
 RUN echo 'export ELAN_HOME="/usr/local/elan"' >> /home/agent/.bashrc && \
     echo 'export PATH="$ELAN_HOME/bin:$PATH"' >> /home/agent/.bashrc
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent

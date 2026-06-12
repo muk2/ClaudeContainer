@@ -54,3 +54,7 @@ RUN mkdir -p /tmp/warmup && cd /tmp/warmup && \
 USER agent
 
 RUN echo 'export PATH="$HOME/.dotnet/tools:$PATH"' >> /home/agent/.bashrc
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent

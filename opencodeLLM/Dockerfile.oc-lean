@@ -35,7 +35,8 @@ RUN curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh && \
     bash /tmp/install-opencode.sh && \
     rm /tmp/install-opencode.sh && \
     cp /root/.opencode/bin/opencode /usr/local/bin/opencode && \
-    opencode --version
+    opencode --version && \
+    opencode upgrade --yes || true
 
 # ── Lean 4 (elan) ───────────────────────────────────────
 ENV ELAN_HOME="/usr/local/elan"

@@ -30,3 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130
 
 USER agent
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent

@@ -203,3 +203,7 @@ export PATH="$ELAN_HOME/bin:$PATH"
 # OCaml (auto-activate opam switch)
 eval $(opam env 2>/dev/null) || true
 EOF
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent
