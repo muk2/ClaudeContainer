@@ -119,6 +119,38 @@ RUN cp -r /root/.dotnet /home/agent/.dotnet 2>/dev/null || true && \
     chown -R agent:agent /home/agent/.dotnet 2>/dev/null || true
 ENV PATH="/home/agent/.dotnet/tools:${PATH}"
 
+# ── Swift toolchain ──────────────────────────────────────
+ARG SWIFT_VERSION=6.0.3
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ]; then \
+        SWIFT_ARCH=aarch64; \
+        SWIFT_SUFFIX="-${SWIFT_ARCH}"; \
+    else \
+        SWIFT_ARCH=x86_64; \
+        SWIFT_SUFFIX=""; \
+    fi && \
+    PLATFORM_DIR="ubuntu2404${SWIFT_SUFFIX}" && \
+    TARBALL="swift-${SWIFT_VERSION}-RELEASE-ubuntu24.04${SWIFT_SUFFIX}.tar.gz" && \
+    URL="https://download.swift.org/swift-${SWIFT_VERSION}-release/${PLATFORM_DIR}/swift-${SWIFT_VERSION}-RELEASE/${TARBALL}" && \
+    curl -fsSL "$URL" -o /tmp/swift.tar.gz && \
+    mkdir -p /usr/share/swift && \
+    tar xzf /tmp/swift.tar.gz -C /usr/share/swift --strip-components=1 && \
+    rm /tmp/swift.tar.gz && \
+    ln -s /usr/share/swift/usr/bin/swift /usr/local/bin/swift && \
+    ln -s /usr/share/swift/usr/bin/swiftc /usr/local/bin/swiftc && \
+    ln -s /usr/share/swift/usr/bin/sourcekit-lsp /usr/local/bin/sourcekit-lsp || true
+ENV PATH="/usr/share/swift/usr/bin:${PATH}"
+
+# ── Swift developer tools (swift-format) ────────────────
+RUN mkdir -p /home/agent/.local/bin && chown -R agent:agent /home/agent/.local
+USER agent
+RUN mkdir -p /tmp/swift-format && cd /tmp/swift-format && \
+    git clone --depth 1 https://github.com/swiftlang/swift-format.git . && \
+    swift build -c release --product swift-format && \
+    cp .build/release/swift-format /home/agent/.local/bin/ && \
+    rm -rf /tmp/swift-format || true
+USER root
+
 # ── Lean 4 (install to shared location, fix permissions) ─
 ENV ELAN_HOME="/usr/local/elan"
 RUN curl https://elan.lean-lang.org/elan-init.sh -sSf \
@@ -163,6 +195,8 @@ export GOPATH="$HOME/go"
 export PATH="$GOPATH/bin:/usr/local/go/bin:$PATH"
 # .NET
 export PATH="$HOME/.dotnet/tools:$PATH"
+# Swift
+export PATH="$HOME/.local/bin:/usr/share/swift/usr/bin:$PATH"
 # Lean
 export ELAN_HOME="/usr/local/elan"
 export PATH="$ELAN_HOME/bin:$PATH"
