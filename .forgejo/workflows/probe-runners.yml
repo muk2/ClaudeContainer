@@ -1,0 +1,120 @@
+name: Probe runners
+
+# One-shot discovery workflow. Triggers manually OR on any push to this
+# file. Tries to schedule a job on each candidate `runs-on` label and
+# reports whether docker is available, what arch, what disk. Result of
+# each probe is pushed to ci-debug/probe-<label>.md.
+#
+# A label that's not registered will simply never schedule (the matrix
+# entry stays "waiting" and the workflow times out for that one entry).
+# A label that's registered will produce a probe-<label>.md within a
+# minute or two.
+
+on:
+  push:
+    paths: [".forgejo/workflows/probe-runners.yml"]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: Probe ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        label:
+          - ubuntu-latest
+          - ubuntu-22.04
+          - ubuntu-20.04
+          - docker
+          - self-hosted
+          - host
+          - native
+          - dind
+          - linux
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 3
+    steps:
+      - name: Inspect runner
+        shell: bash
+        run: |
+          set +e
+          LABEL='${{ matrix.label }}'
+          OUT="$RUNNER_TEMP/probe-${LABEL}.md"
+          {
+            echo "## Probe of runs-on: \`${LABEL}\`"
+            echo ""
+            echo "Run: \`${GITHUB_RUN_NUMBER}\`   Commit: \`${GITHUB_SHA:0:8}\`"
+            echo ""
+            echo "### Identity"
+            echo '```'
+            echo "hostname: $(hostname 2>&1)"
+            echo "whoami:   $(whoami 2>&1)"
+            echo "uname -m: $(uname -m 2>&1)"
+            echo "uname -a: $(uname -a 2>&1 | head -1)"
+            echo "RUNNER_OS:   ${RUNNER_OS:-unset}"
+            echo "RUNNER_ARCH: ${RUNNER_ARCH:-unset}"
+            echo "ImageOS:     ${ImageOS:-unset}"
+            echo "ACT:         ${ACT:-unset}"
+            echo '```'
+            echo ""
+            echo "### Docker"
+            echo '```'
+            if command -v docker >/dev/null 2>&1; then
+              docker --version 2>&1
+              echo "---"
+              docker info 2>&1 | head -25
+              echo "---"
+              echo "trivial run test:"
+              docker run --rm hello-world 2>&1 | head -10 || echo "docker run FAILED"
+            else
+              echo "docker: MISSING"
+            fi
+            echo '```'
+            echo ""
+            echo "### Disk"
+            echo '```'
+            df -h / 2>&1 | head -3
+            echo '```'
+          } > "$OUT" 2>&1
+          echo "--- begin probe-${LABEL}.md ---"
+          cat "$OUT"
+          echo "--- end probe-${LABEL}.md ---"
+          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+        id: gather
+
+      - name: Push result to ci-debug
+        if: always()
+        shell: bash
+        env:
+          DEBUG_TOKEN: ${{ secrets.CI_DEBUG_TOKEN }}
+        run: |
+          set +e
+          [ -z "${DEBUG_TOKEN:-}" ] && { echo "no CI_DEBUG_TOKEN"; exit 0; }
+          OUT="${{ steps.gather.outputs.out }}"
+          [ -z "$OUT" ] || [ ! -f "$OUT" ] && {
+            # gather step may have died before writing the file; create a stub
+            OUT="$RUNNER_TEMP/probe-${{ matrix.label }}.md"
+            echo "## Probe ${{ matrix.label }} -- gather step did not complete" > "$OUT"
+          }
+          WORK=$(mktemp -d) && cd "$WORK"
+          BASEURL="${GITHUB_SERVER_URL#http://}"; BASEURL="${BASEURL#https://}"
+          REMOTE="http://oauth2:${DEBUG_TOKEN}@${BASEURL}/${GITHUB_REPOSITORY}.git"
+          git init -q
+          git config user.email "ci@forgejo"
+          git config user.name "ci-debug"
+          git remote add origin "$REMOTE"
+          # Retry the fetch+rebase+push a few times to avoid losing to a
+          # sibling matrix entry pushing concurrently.
+          for attempt in 1 2 3 4 5; do
+            rm -f probe-*.md 2>/dev/null
+            git fetch --depth=1 origin ci-debug && git checkout -B ci-debug FETCH_HEAD || git checkout --orphan ci-debug
+            cp "$OUT" "probe-${{ matrix.label }}.md"
+            git add "probe-${{ matrix.label }}.md"
+            git commit -m "probe: ${{ matrix.label }} (run ${GITHUB_RUN_NUMBER})" >/dev/null 2>&1 || true
+            if git push origin ci-debug >/dev/null 2>&1; then
+              echo "Pushed probe-${{ matrix.label }}.md (attempt $attempt)"
+              exit 0
+            fi
+            sleep $((RANDOM % 5 + 2))
+          done
+          echo "Failed to push after retries"

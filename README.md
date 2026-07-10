@@ -27,6 +27,28 @@ Pre-built Docker images with full language toolchains for running [Claude Code](
 
 ---
 
+## Continuous Integration
+
+Two CI systems validate Dockerfiles before merge:
+
+### GitHub Actions (`.github/workflows/docker-build.yml`)
+
+**Builds** every Dockerfile touched by a pull request using `docker build` on `ubuntu-latest` runners. Matrix-strategy builds run in parallel — only changed images are built on PR, all images are built on push to `main`. The `claude-all` mega-image is included (note: builds can take 15–25 min).
+
+Runs on:
+- **Pull requests** to `main` that touch `Dockerfile.*`, `entrypoint.sh`, or the workflow itself.
+- **Push** to `main` — full build of every image.
+- **Manual trigger** (`workflow_dispatch`) — optionally set `build_all=true` to rebuild everything.
+
+### Forgejo Actions (`.forgejo/workflows/build-containers.yml`)
+
+**Lints** every Dockerfile touched by a pull request using [hadolint](https://github.com/hadolint/hadolint). Linting is static analysis only — the Forgejo runner doesn't have Docker available, so this is a fast syntax/style check instead of a real build.
+Path-filtered so PRs that only touch the README or docs skip CI entirely, and only the Dockerfiles whose contents changed in the diff are checked.
+
+Workflow-dispatch with `lint_all=true` checks every Dockerfile regardless of what changed.
+
+---
+
 ## Mac Setup
 
 ### Step 1: Install a Container Runtime

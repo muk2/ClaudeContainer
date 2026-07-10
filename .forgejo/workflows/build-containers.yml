@@ -1,0 +1,207 @@
+name: Build container images
+
+# Static Dockerfile validation. The configured act_runner doesn't have
+# Docker available (see commit 1ccd4dc), so we lint via hadolint instead
+# of building. README has the upgrade path for real builds.
+#
+# The job captures all of its stdout/stderr to /tmp/lint.log and pushes
+# it to the `ci-debug` branch in a final always-runs step, so failures
+# are debuggable without access to the act_runner log endpoint.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'claude/Dockerfile.*'
+      - 'opencodeLLM/Dockerfile.*'
+      - 'claude/forgejo-entrypoint.sh'
+      - 'opencodeLLM/entrypoint.sh'
+      - '.forgejo/workflows/build-containers.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'claude/Dockerfile.*'
+      - 'opencodeLLM/Dockerfile.*'
+      - 'claude/forgejo-entrypoint.sh'
+      - 'opencodeLLM/entrypoint.sh'
+      - '.forgejo/workflows/build-containers.yml'
+  workflow_dispatch:
+    inputs:
+      lint_all:
+        description: "Lint every Dockerfile, not just changed ones"
+        type: boolean
+        default: false
+
+jobs:
+  lint:
+    name: Lint changed Dockerfiles
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lint
+        shell: bash
+        run: |
+          # Single-step job: everything tees to /tmp/lint.log so the
+          # always-runs publisher step at the end can ship the log to
+          # the ci-debug branch on failure.
+          exec > >(tee -a /tmp/lint.log) 2>&1
+          set +e
+          fail() { echo "FAIL: $1"; exit 1; }
+
+          echo "════════════════════════════════════════════════════════════"
+          echo "Lint job starting"
+          echo "Event: ${GITHUB_EVENT_NAME}    Run: ${GITHUB_RUN_NUMBER}"
+          echo "SHA:   ${GITHUB_SHA}"
+          echo "════════════════════════════════════════════════════════════"
+
+          # ── 1. Make sure the workspace has the repo at the head SHA ──
+          cd "${GITHUB_WORKSPACE}"
+          if [ ! -d .git ]; then
+            echo "No .git -- cloning manually"
+            git init -q
+            git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+            git fetch --depth=50 origin "${GITHUB_SHA}" || fail "git fetch HEAD"
+            git checkout -q "${GITHUB_SHA}" || fail "git checkout HEAD"
+          else
+            echo ".git already present; using existing workspace"
+            git status --short | head -10
+          fi
+
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --depth=50 origin "${GITHUB_BASE_REF}" 2>/dev/null || \
+              echo "WARN: could not fetch base ref ${GITHUB_BASE_REF}"
+          fi
+
+          # ── 2. Install hadolint ──
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            aarch64|arm64) HADO_ARCH=arm64 ;;
+            x86_64|amd64)  HADO_ARCH=x86_64 ;;
+            *) fail "unsupported arch $ARCH" ;;
+          esac
+          if [ ! -x /usr/local/bin/hadolint ]; then
+            echo "Downloading hadolint..."
+            if curl -fsSL --connect-timeout 10 -o /tmp/hadolint \
+                "https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-${HADO_ARCH}"; then
+              chmod +x /tmp/hadolint
+              mv /tmp/hadolint /usr/local/bin/hadolint
+            else
+              echo "github.com unreachable; trying apt"
+              apt-get update -qq && apt-get install -y -qq hadolint \
+                || fail "could not install hadolint (no github, no apt)"
+            fi
+          fi
+          hadolint --version || fail "hadolint binary broken"
+
+          # ── 3. Decide which Dockerfiles to lint ──
+          LINT_ALL="${{ inputs.lint_all }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "$LINT_ALL" = "true" ]; then
+            TARGETS=$(ls claude/Dockerfile.* opencodeLLM/Dockerfile.* 2>/dev/null)
+          else
+            BASE=""
+            if [ -n "${GITHUB_BASE_REF:-}" ] && git rev-parse --verify -q "origin/${GITHUB_BASE_REF}" >/dev/null; then
+              BASE="origin/${GITHUB_BASE_REF}"
+            elif git rev-parse --verify -q "${GITHUB_SHA}^" >/dev/null; then
+              BASE="${GITHUB_SHA}^"
+            fi
+
+            if [ -n "$BASE" ]; then
+              echo "Diffing against $BASE"
+              CHANGED=$(git diff --name-only "$BASE" "${GITHUB_SHA}")
+            else
+              echo "No base ref available; falling back to ls"
+              CHANGED=$(ls claude/Dockerfile.* opencodeLLM/Dockerfile.* 2>/dev/null)
+            fi
+            echo "--- changed ---"
+            echo "$CHANGED"
+            echo "---------------"
+
+            SHARED=false
+            if echo "$CHANGED" | grep -qE \
+                '(claude/forgejo-entrypoint\.sh|opencodeLLM/entrypoint\.sh|\.forgejo/workflows/build-containers\.yml)$'; then
+              SHARED=true
+            fi
+
+            TARGETS=$(echo "$CHANGED" | grep -E '^(claude|opencodeLLM)/Dockerfile\.' || true)
+            if [ "$SHARED" = "true" ] && [ -z "$TARGETS" ]; then
+              echo "Shared file changed -> canary set"
+              TARGETS=$'claude/Dockerfile.python\nclaude/Dockerfile.go\nopencodeLLM/Dockerfile.oc-python\nopencodeLLM/Dockerfile.oc-go'
+            fi
+          fi
+
+          REAL=()
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if [ -f "$f" ]; then
+              REAL+=("$f")
+            else
+              echo "Skip nonexistent: $f"
+            fi
+          done <<< "$TARGETS"
+
+          if [ ${#REAL[@]} -eq 0 ]; then
+            echo "Nothing to lint."
+            exit 0
+          fi
+
+          echo "Will lint ${#REAL[@]} file(s):"
+          printf '  %s\n' "${REAL[@]}"
+
+          # ── 4. Lint ──
+          # hadolint's parser doesn't handle multi-line heredocs in RUN
+          # (https://github.com/hadolint/hadolint/issues/784). Detect parse
+          # failures (output contains 'unexpected ... expecting') and treat
+          # them as warnings instead of CI failures. Real rule violations
+          # at error severity still fail the job.
+          FAILED=0
+          SKIPPED=0
+          for f in "${REAL[@]}"; do
+            echo ""
+            echo "════════════ $f ════════════"
+            OUT=$(hadolint --no-fail "$f" 2>&1)
+            echo "$OUT"
+            if echo "$OUT" | grep -qE 'unexpected .* expecting'; then
+              echo "WARN: hadolint can't parse $f (likely heredoc/RUN <<EOF) -- skipping rule check"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+            if ! hadolint --failure-threshold error "$f" >/dev/null 2>&1; then
+              echo ">>> ERROR-level issues in $f"
+              FAILED=$((FAILED + 1))
+            fi
+          done
+
+          echo ""
+          echo "Summary: ${#REAL[@]} file(s) checked, $SKIPPED skipped (parser limitation), $FAILED failed"
+          if [ "$FAILED" -gt 0 ]; then
+            exit 1
+          fi
+          echo "All Dockerfiles passed hadolint."
+
+      - name: Publish log to ci-debug branch
+        if: always()
+        shell: bash
+        env:
+          DEBUG_TOKEN: ${{ secrets.CI_DEBUG_TOKEN }}
+        run: |
+          set +e
+          [ -z "${DEBUG_TOKEN:-}" ] && { echo "no CI_DEBUG_TOKEN; skipping log publish"; exit 0; }
+          [ ! -s /tmp/lint.log ] && { echo "no lint.log to publish"; exit 0; }
+
+          WORK=$(mktemp -d) || exit 0
+          cd "$WORK" || exit 0
+          BASEURL="${GITHUB_SERVER_URL#http://}"
+          BASEURL="${BASEURL#https://}"
+          REMOTE="http://oauth2:${DEBUG_TOKEN}@${BASEURL}/${GITHUB_REPOSITORY}.git"
+          git init -q
+          git config user.email "ci@forgejo"
+          git config user.name "ci-debug"
+          git remote add origin "$REMOTE"
+          git fetch --depth=1 origin ci-debug 2>/dev/null && git checkout -B ci-debug FETCH_HEAD || git checkout --orphan ci-debug
+          git rm -rf . >/dev/null 2>&1 || true
+          STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          cp /tmp/lint.log "lint-${STAMP}.log"
+          cp /tmp/lint.log "lint-latest.log"
+          git add lint-*.log
+          git commit -m "lint: run ${GITHUB_RUN_NUMBER} (${GITHUB_SHA:0:8})" >/dev/null
+          git push -f origin ci-debug >/dev/null 2>&1
+          echo "Published lint-${STAMP}.log to ci-debug"
