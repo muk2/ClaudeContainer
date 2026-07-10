@@ -60,3 +60,7 @@ USER agent
 
 RUN echo 'export GOPATH="$HOME/go"' >> /home/agent/.bashrc && \
     echo 'export PATH="$GOPATH/bin:/usr/local/go/bin:$PATH"' >> /home/agent/.bashrc
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent

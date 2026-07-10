@@ -83,7 +83,14 @@ OC_DIR="$HOME/.opencode/containers"
 
 # Build an image (run once per language)
 oc-lang() {
-    docker build -t "oc-${1}:latest" \
+    docker build --pull -t "oc-${1}:latest" \
+        -f "$OC_DIR/Dockerfile.oc-${1}" \
+        "$OC_DIR/"
+}
+
+# Rebuild to get latest OpenCode + toolchains
+oc-lang-update() {
+    docker build --pull --no-cache -t "oc-${1}:latest" \
         -f "$OC_DIR/Dockerfile.oc-${1}" \
         "$OC_DIR/"
 }

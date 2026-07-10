@@ -31,3 +31,7 @@ RUN git clone --depth 1 --branch ${ZIG_VERSION} \
 RUN zig version && zls --version
 
 USER agent
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent

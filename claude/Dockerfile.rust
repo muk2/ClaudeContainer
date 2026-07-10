@@ -45,3 +45,7 @@ RUN mkdir -p /home/agent/.cargo && \
     echo '[target.x86_64-unknown-linux-gnu]' >> /home/agent/.cargo/config.toml && \
     echo 'linker = "clang"' >> /home/agent/.cargo/config.toml && \
     echo 'rustflags = ["-C", "link-arg=-fuse-ld=mold"]' >> /home/agent/.cargo/config.toml
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent

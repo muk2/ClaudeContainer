@@ -48,3 +48,7 @@ RUN mkdir -p /tmp/swift-format && cd /tmp/swift-format && \
     rm -rf /tmp/swift-format || true
 
 RUN echo 'export PATH="$HOME/.local/bin:/usr/share/swift/usr/bin:$PATH"' >> /home/agent/.bashrc
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent

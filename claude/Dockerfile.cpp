@@ -37,3 +37,7 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 \
     --slave /usr/bin/g++ g++ /usr/bin/g++-13
 
 USER agent
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent

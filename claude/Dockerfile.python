@@ -50,3 +50,7 @@ RUN cp -r /root/.local/share/uv /home/agent/.local/share/uv 2>/dev/null || true 
     chown -R agent:agent /home/agent/.local 2>/dev/null || true
 
 USER agent
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent

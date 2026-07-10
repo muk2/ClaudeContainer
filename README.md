@@ -142,7 +142,14 @@ docker volume create build-cache
 
 # Build a language image (run once per language)
 sb-lang() {
-    docker build -t "claude-${1}:latest" \
+    docker build --pull -t "claude-${1}:latest" \
+        -f "$HOME/.claude/sandboxes/Dockerfile.${1}" \
+        "$HOME/.claude/sandboxes/"
+}
+
+# Rebuild to get latest Claude Code + toolchains
+sb-lang-update() {
+    docker build --pull --no-cache -t "claude-${1}:latest" \
         -f "$HOME/.claude/sandboxes/Dockerfile.${1}" \
         "$HOME/.claude/sandboxes/"
 }
@@ -195,7 +202,7 @@ sb-lang rust
 sb-lang swift
 ```
 
-Takes 5-15 minutes the first time. Cached after that — only rebuild if you edit the Dockerfile.
+Takes 5-15 minutes the first time. Cached after that — only rebuild if you edit the Dockerfile. Run `sb-lang-update <lang>` to force a fresh build with the latest Claude Code and tools.
 
 ### Step 6: First Run
 

@@ -34,3 +34,7 @@ RUN opam init --bare --disable-sandboxing -y && \
 # ── Shell setup so opam env is always loaded ─────────────
 RUN echo 'eval $(opam env)' >> /home/agent/.bashrc && \
     echo 'eval $(opam env)' >> /home/agent/.profile
+
+USER root
+RUN claude update --yes 2>/dev/null || true
+USER agent
