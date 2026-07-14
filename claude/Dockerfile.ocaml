@@ -6,7 +6,7 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential gcc g++ gdb valgrind cmake make \
     pkg-config libssl-dev libffi-dev zlib1g-dev \
-    libgmp-dev libpcre3-dev \
+    libgmp-dev libpcre2-dev \
     m4 bubblewrap unzip \
     curl wget htop tree strace \
     opam \
@@ -28,7 +28,7 @@ RUN opam init --bare --disable-sandboxing -y && \
         async async_unix \
         yojson cmdliner fmt logs \
         lwt lwt_ppx cohttp-lwt-unix \
-        re pcre \
+        re pcre2 \
         menhir sedlex
 
 # ── Shell setup so opam env is always loaded ─────────────

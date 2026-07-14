@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nasm yasm mold \
     strace ltrace binutils elfutils \
     libssl-dev libffi-dev zlib1g-dev \
-    libgmp-dev libpcre3-dev \
+    libgmp-dev libpcre2-dev \
     libpq-dev postgresql-client \
     libboost-dev libfmt-dev nlohmann-json3-dev \
     libsqlite3-dev libreadline-dev libncurses5-dev \
