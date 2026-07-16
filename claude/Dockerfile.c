@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurl4-openssl-dev libxml2-dev \
     libsqlite3-dev libpq-dev \
     libevent-dev libev-dev libuv1-dev \
-    libpcre3-dev libjansson-dev \
+    libpcre2-dev libjansson-dev \
     libcmocka-dev \
     strace ltrace binutils elfutils \
     cppcheck \
